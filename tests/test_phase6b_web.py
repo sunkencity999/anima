@@ -91,7 +91,7 @@ class TestAuth:
         _, sense = shell_and_sense
         status, body, _ = call(sense, "GET", "/", token=None, raw=True)
         assert status == 401
-        assert b"LOCKED" in body
+        assert b"DOME IS CLOSED" in body
 
     def test_empty_token_config_refused(self):
         with pytest.raises(ValueError, match="token"):
