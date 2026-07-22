@@ -71,6 +71,19 @@ body::before {
 }
 @keyframes drift { from { transform: translate3d(0,0,0); }
                    to   { transform: translate3d(40px,-25px,0); } }
+body::before { animation-duration: var(--drift-s, 120s); }
+/* ambient mood veil — see the "mood" comment in the script: hue and
+   opacity are set from live drive pressures, nothing decorative */
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(1000px 640px at 50% -8%,
+      hsla(var(--mood-h, 195), 75%, 60%, var(--mood-a, 0.035)),
+      transparent 65%),
+    radial-gradient(800px 520px at 82% 108%,
+      hsla(var(--mood-h, 195), 65%, 50%, calc(var(--mood-a, 0.035) * .6)),
+      transparent 60%);
+}
 
 .wrap { max-width: 1220px; margin: 0 auto; padding: 22px 24px 70px;
         position: relative; z-index: 1; }
@@ -410,6 +423,7 @@ async function pollExpressions() {
 const R = 40, CIRC = 2 * Math.PI * R;
 function renderDrives(doc) {
   const ds = doc.drives || [];
+  setMoodFromDrives(ds);
   if (!ds.length) return;
   const box = $("drives"); box.innerHTML = "";
   for (const d of ds) {
@@ -441,6 +455,41 @@ function renderDrives(doc) {
   }
 }
 async function pollDrives() { renderDrives(await api("/api/drives")); }
+
+/* ── ambient mood ──
+   The background is an instrument, not a decoration. From the live
+   drive pressures we derive a two-number mood vector:
+     pressure = mean drive fraction (0..1)  — how much wants to happen
+     heat     = max drive fraction, forced to 1 if any wake is pending
+                                            — how close the nearest urge
+                                              is to acting
+   Mapping (lerped ~10%/200ms so the room changes like light, not like
+   a status LED):
+     --mood-h : veil hue, 195° starlight blue (calm) → 35° dome amber
+                (about to wake), driven by heat
+     --mood-a : veil opacity .03 → .11, driven by pressure
+     --drift-s: plankton drift period 120s (still) → 45s (agitated),
+                driven by pressure */
+const mood = { h: 195, a: 0.035, d: 120 };
+let moodTarget = { h: 195, a: 0.035, d: 120 };
+function setMoodFromDrives(ds) {
+  if (!ds.length) return;
+  const fr = ds.map(d => Math.max(0, Math.min(1, d.fraction || 0)));
+  const pressure = fr.reduce((s, f) => s + f, 0) / fr.length;
+  const heat = ds.some(d => d.pending) ? 1 : Math.max(...fr);
+  moodTarget = { h: 195 - 160 * heat,          /* 195° → 35° */
+                 a: 0.03 + 0.08 * pressure,
+                 d: 120 - 75 * pressure };
+}
+setInterval(() => {
+  const k = 0.1, st = document.documentElement.style;
+  mood.h += (moodTarget.h - mood.h) * k;
+  mood.a += (moodTarget.a - mood.a) * k;
+  mood.d += (moodTarget.d - mood.d) * k;
+  st.setProperty("--mood-h", mood.h.toFixed(1));
+  st.setProperty("--mood-a", mood.a.toFixed(4));
+  st.setProperty("--drift-s", mood.d.toFixed(1) + "s");
+}, 200);
 
 /* ── lineage: illuminated timeline ── */
 const GLYPHS = { init: "✶", migration: "⇌", runtime_change: "↻",
