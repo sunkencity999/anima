@@ -33,6 +33,11 @@ def main(argv=None) -> int:
     ap.add_argument("--http-config", default=None,
                     help="path to http sense config JSON "
                          "(default <root>/senses/http.json)")
+    ap.add_argument("--telegram", action="store_true",
+                    help="attach the Telegram sense (long polling)")
+    ap.add_argument("--telegram-config", default=None,
+                    help="path to telegram sense config JSON "
+                         "(default <root>/senses/telegram.json)")
     ap.add_argument("--sender", default="operator",
                     help="person id for console messages")
     args = ap.parse_args(argv)
@@ -44,13 +49,20 @@ def main(argv=None) -> int:
               "record-only default handler (no model turns)",
               file=sys.stderr)
 
-    use_console = args.console or (sys.stdin.isatty() and not args.http)
+    use_console = args.console or (
+        sys.stdin.isatty() and not args.http and not args.telegram)
 
     if args.http:
         from .senses.http_sense import HttpSense
         cfg = args.http_config or os.path.join(
             os.path.abspath(args.root), "senses", "http.json")
         shell.add_sense("http", HttpSense(config_path=cfg))
+
+    if args.telegram:
+        from .senses.telegram_sense import TelegramSense
+        cfg = args.telegram_config or os.path.join(
+            os.path.abspath(args.root), "senses", "telegram.json")
+        shell.add_sense("telegram", TelegramSense(config_path=cfg))
 
     if use_console:
         console = ConsoleSense(sender=args.sender)

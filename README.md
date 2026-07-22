@@ -18,6 +18,49 @@ dependencies (pytest only for the test suite).
   tool registry (the entity's hands), the agent turn (act phase), a
   wall-clock shell with pidfile single-writer discipline and graceful
   shutdown-as-settle, and senses (console / HTTP / OpenClaw bridge).
+- **Phase 6a — packaging + CLI + Telegram sense**: installable
+  `anima-harness` package with the `anima` entity-lifecycle CLI
+  (init / run / status / sync-as-migration) and a pure-stdlib Telegram
+  long-polling sense.
+
+## Phase 6a: install + CLI + Telegram
+
+```bash
+pip install -e .            # console script: anima
+
+anima init ~/entities/me    # scaffold an entity root (refuses to
+                            # overwrite existing identity files)
+anima status --root ~/entities/me   # memory / drives / lineage / lock
+anima run --root ~/entities/me --console
+anima sync ~/entities/me /mnt/newhome/me   # MIGRATION, not cloning:
+                            # refuses while the runtime lock is live,
+                            # records a migration lineage entry on the
+                            # source BEFORE copying (both forks carry
+                            # it), and warns that forks diverge.
+```
+
+**Telegram sense** (`anima run --root R --telegram`): pure-stdlib Bot
+API long polling — no SDK. Configure `R/senses/telegram.json`:
+
+```json
+{
+  "token_env": "ANIMA_TELEGRAM_TOKEN",
+  "allowed_chat_ids": [123456789],
+  "person_map": {"123456789": "christopher"},
+  "operator_person": "christopher"
+}
+```
+
+- Token comes from the env var (or a `"token"` literal for tests).
+- The allowlist **fails closed**: an empty list means no chats.
+- Private chats become `direct` AccessContexts with the mapped person;
+  unmapped-but-allowed users get an auto identity `tg-<user_id>`
+  upserted into the RelationshipStore. Group chats become `group`
+  contexts, so private-scoped memory is structurally invisible there.
+- Disallowed chats are ignored *and* noted in the ledger.
+- The getUpdates offset persists in `senses/telegram_offset.json`, so
+  restarts never replay old messages. Replies go back to the
+  originating chat via sendMessage.
 
 ## Layout
 
