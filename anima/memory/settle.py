@@ -45,6 +45,12 @@ def _normalize(item: Union[str, dict], default_kind: str,
                 "actors": [], "tags": [],
                 "scope": default_scope, "owner": default_owner}
     out = dict(item)
+    # Accept "owner_person_id" (the column name used on every read path)
+    # as an alias for "owner". A silent mismatch here would fail closed —
+    # a private row with owner NULL is invisible to everyone, including
+    # the person it belongs to — safe, but lossy. Aliasing kills the trap.
+    if "owner" not in out and "owner_person_id" in out:
+        out["owner"] = out.pop("owner_person_id")
     out.setdefault("summary", out.get("detail", "")[:120] or "(no summary)")
     out.setdefault("detail", "")
     out.setdefault("kind", default_kind)

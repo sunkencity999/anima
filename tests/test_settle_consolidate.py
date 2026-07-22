@@ -141,3 +141,15 @@ def test_cli_round_trip(tmp_path):
     stats = json.loads(r.stdout)
     assert stats["episodes"] == 2
     assert stats["beliefs"]["active"] == 1
+
+
+def test_settle_owner_person_id_alias(store):
+    """'owner_person_id' (the read-path column name) must work as an alias
+    for 'owner' in wake-report events — a silent mismatch would create
+    private rows locked away from their own owner (fail-closed but lossy)."""
+    from anima.memory.settle import settle
+    settle(store, {"summary": "alias check", "events": [
+        {"kind": "event", "summary": "aliased owner row",
+         "scope": "private", "owner_person_id": "antonia"}]})
+    eps = [e for e in store.recent_episodes(10) if "aliased owner" in e["summary"]]
+    assert eps and eps[0]["owner_person_id"] == "antonia"
