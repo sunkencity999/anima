@@ -385,6 +385,75 @@ def cmd_sync(args) -> int:
     return 0
 
 
+# ── sky (the shared sky: multi-entity observatory) ──────────────────
+
+def _sky_template() -> dict:
+    import secrets
+    return {
+        "port": 8763,
+        "bind": "0.0.0.0",
+        "token": secrets.token_urlsafe(24),
+        "poll_s": 10,
+        "timeout_s": 4,
+        "title": "the shared sky",
+        "peers": [
+            {"name": "example",
+             "url": "http://127.0.0.1:8762",
+             "token": "<that entity's web token>"},
+        ],
+    }
+
+
+def cmd_sky(args) -> int:
+    cfg_path = os.path.abspath(args.config)
+
+    if args.init:
+        if os.path.exists(cfg_path):
+            print(f"refusing to overwrite existing sky config at "
+                  f"{cfg_path}", file=sys.stderr)
+            return 1
+        os.makedirs(os.path.dirname(cfg_path) or ".", exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(_sky_template(), f, indent=2)
+            f.write("\n")
+        print(f"sky config scaffolded at {cfg_path}")
+        print("edit the peers list (each peer's Observatory URL + web "
+              "token), then: anima sky --config " + args.config)
+        return 0
+
+    from .runtime.sky import SkyAggregator
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except FileNotFoundError:
+        print(f"no sky config at {cfg_path}; scaffold one with "
+              f"`anima sky --config {args.config} --init`",
+              file=sys.stderr)
+        return 1
+    if args.port is not None:
+        cfg["port"] = args.port
+    if args.bind is not None:
+        cfg["bind"] = args.bind
+
+    sky = SkyAggregator(cfg)
+    sky.refresh()                      # first pass before serving
+    sky.start()
+    from .runtime.__main__ import _lan_ip
+    host = sky.bind if sky.bind not in ("0.0.0.0", "") else _lan_ip()
+    up = sum(1 for p in sky._snapshot["peers"] if p["reachable"])
+    print(f"shared sky: http://{host}:{sky.port}/?token=… "
+          f"(token in {cfg_path})", file=sys.stderr)
+    print(f"peers: {up}/{len(sky.peers)} reachable", file=sys.stderr)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sky.stop()
+    return 0
+
+
 # ── entry point ───────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
@@ -422,6 +491,18 @@ def main(argv=None) -> int:
     p.add_argument("root", help="source entity root")
     p.add_argument("dest", help="destination directory (must be empty)")
     p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser("sky", help="serve the shared sky (multi-entity "
+                                   "observatory aggregator)")
+    p.add_argument("--config", required=True,
+                   help="sky config JSON (e.g. senses/sky.json)")
+    p.add_argument("--init", action="store_true",
+                   help="scaffold a sky config template and exit")
+    p.add_argument("--port", type=int, default=None,
+                   help="override the configured port")
+    p.add_argument("--bind", default=None,
+                   help="override the configured bind address")
+    p.set_defaults(func=cmd_sky)
 
     args = ap.parse_args(argv)
     return args.func(args)

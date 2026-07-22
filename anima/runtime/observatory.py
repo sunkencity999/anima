@@ -1199,6 +1199,428 @@ the dome open.</p>
 """
 
 
+SKY_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ — shared sky</title>
+<style>
+:root {
+  --abyss:  #030809;
+  --deep:   #06121a;
+  --panel:  rgba(9, 24, 32, 0.78);
+  --line:   rgba(94, 234, 212, 0.10);
+  --line2:  rgba(94, 234, 212, 0.22);
+  --ink:    #c9dcd8; --ink-dim: #6d8a86; --ink-faint: #3c5450;
+  --glow:   #5eead4; --glow2: #7fd4ff; --lamp: #ffb45e;
+  --err:    #ff8d9d;
+  --serif:  Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --sans:   system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono:   ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+html { background: var(--abyss); }
+body {
+  font-family: var(--sans); color: var(--ink);
+  background:
+    radial-gradient(1200px 620px at 70% -12%, #0b2430 0%, transparent 60%),
+    radial-gradient(1000px 700px at -12% 108%, #07202a 0%, transparent 55%),
+    linear-gradient(180deg, var(--deep), var(--abyss) 62%);
+  background-attachment: fixed;
+}
+.wrap { max-width: 1380px; margin: 0 auto; padding: 22px 24px 60px;
+        position: relative; }
+header { display: flex; align-items: baseline; gap: 18px;
+  flex-wrap: wrap; padding: 10px 2px 18px; margin-bottom: 18px;
+  position: relative; }
+header::after { content: ""; position: absolute; left: 0; right: 0;
+  bottom: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line2) 20%,
+              var(--line2) 60%, transparent); }
+header h1 { font-family: var(--serif); font-size: 28px; font-weight: 400;
+  margin: 0; letter-spacing: .06em; color: #e9f4f0;
+  text-shadow: 0 0 26px rgba(94,234,212,.35); }
+header h1 .dome { color: var(--lamp);
+  text-shadow: 0 0 18px rgba(255,180,94,.6);
+  animation: lamp 7s ease-in-out infinite; }
+@keyframes lamp { 0%,100% { opacity:.85; } 50% { opacity:1; } }
+header .sub { font-family: var(--serif); font-style: italic;
+  font-size: 13px; color: var(--ink-dim); letter-spacing: .12em; }
+header .spacer { flex: 1; }
+.pill { font-family: var(--mono); font-size: 11px; padding: 4px 12px;
+  border: 1px solid var(--line); border-radius: 999px;
+  color: var(--ink-dim); background: rgba(3,10,12,.4); }
+.pill .dot { display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--glow);
+  box-shadow: 0 0 10px var(--glow); margin-right: 7px;
+  vertical-align: 1px; animation: heartbeat 4s ease-in-out infinite; }
+@keyframes heartbeat { 0%,100% { opacity:.6; } 50% { opacity:1; } }
+
+/* ── the sky itself ── */
+#skybox { position: relative; border: 1px solid var(--line);
+  border-radius: 14px; overflow: hidden;
+  background: radial-gradient(900px 420px at 50% 115%,
+    rgba(94,234,212,.05), transparent 70%),
+    linear-gradient(180deg, rgba(6,18,24,.5), rgba(3,9,12,.7)); }
+#sky { display: block; width: 100%; height: clamp(380px, 62vh, 720px);
+  cursor: crosshair; }
+.skyhint { position: absolute; left: 14px; bottom: 10px;
+  font-family: var(--serif); font-style: italic; font-size: 11.5px;
+  color: var(--ink-faint); letter-spacing: .1em; pointer-events: none; }
+
+/* ── cluster summary card ── */
+#card { position: absolute; top: 16px; right: 16px; width: 300px;
+  max-width: calc(100% - 32px); max-height: calc(100% - 32px);
+  overflow-y: auto; background: var(--panel);
+  border: 1px solid var(--line2); border-radius: 14px;
+  padding: 16px 18px; backdrop-filter: blur(7px);
+  box-shadow: 0 14px 50px rgba(0,0,0,.5);
+  opacity: 0; transform: translateY(-8px); pointer-events: none;
+  transition: opacity .45s cubic-bezier(.22,1,.36,1),
+              transform .45s cubic-bezier(.22,1,.36,1); }
+#card.shown { opacity: 1; transform: none; pointer-events: auto; }
+#card h3 { margin: 0 0 2px; font-family: var(--serif); font-weight: 400;
+  font-size: 19px; color: #e9f4f0;
+  text-shadow: 0 0 16px rgba(94,234,212,.4); }
+#card .sub { font-family: var(--mono); font-size: 9.5px;
+  color: var(--ink-faint); letter-spacing: .1em; margin-bottom: 10px; }
+#card .sub.err { color: var(--err); }
+#card .row { font-size: 12.5px; color: var(--ink-dim); margin: 6px 0; }
+#card .row b { color: var(--ink); font-weight: 500; }
+#card .dbar { display: flex; align-items: center; gap: 8px;
+  margin: 5px 0; }
+#card .dbar .nm { font-family: var(--serif); font-style: italic;
+  font-size: 12px; color: var(--ink); width: 92px; flex: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#card .dbar .tr { flex: 1; height: 4px; border-radius: 2px;
+  background: rgba(94,234,212,.08); overflow: hidden; }
+#card .dbar .fl { height: 100%; border-radius: 2px;
+  background: var(--glow); box-shadow: 0 0 8px rgba(94,234,212,.5);
+  transition: width .9s cubic-bezier(.22,1,.36,1); }
+#card .dbar.hot .fl { background: var(--lamp);
+  box-shadow: 0 0 8px rgba(255,180,94,.6); }
+#card .dbar .pv { font-family: var(--mono); font-size: 10px;
+  color: var(--ink-faint); width: 28px; text-align: right; }
+#card .xwrap { margin-top: 10px; border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 12px; max-height: 170px;
+  overflow: auto; font-size: 12.5px; line-height: 1.5;
+  background: rgba(3,9,12,.5); }
+#card .xwrap svg { max-width: 100%; height: auto; display: block; }
+#card .xcap { font-family: var(--serif); font-style: italic;
+  font-size: 11.5px; color: var(--lamp); margin-top: 6px; }
+#card a.visit { display: inline-block; margin-top: 12px;
+  font-size: 12.5px; color: var(--glow2); text-decoration: none;
+  border-bottom: 1px dotted rgba(127,212,255,.4); }
+#card a.visit:hover { text-shadow: 0 0 12px rgba(127,212,255,.5); }
+#card .close { position: absolute; top: 8px; right: 12px;
+  cursor: pointer; color: var(--ink-faint); font-size: 15px;
+  background: none; border: none; padding: 4px 6px; min-height: 0; }
+#card .close:hover { color: var(--ink); box-shadow: none; }
+.empty { color: var(--ink-faint); font-size: 13px; font-style: italic;
+  font-family: var(--serif); padding: 14px 6px; }
+footer { margin-top: 26px; text-align: center;
+  font-family: var(--serif); font-style: italic; font-size: 11px;
+  color: var(--ink-faint); letter-spacing: .18em; }
+@media (max-width: 700px) {
+  .wrap { padding: 12px 12px 40px; }
+  header h1 { font-size: 21px; }
+  header .sub { display: none; }
+  #sky { height: min(64dvh, 520px); }
+  #card { top: 8px; right: 8px; left: 8px; width: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01s !important;
+    transition-duration: .01s !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="dome">◉</span> __TITLE__</h1>
+    <span class="sub">every entity a constellation · migrations join them</span>
+    <span class="spacer"></span>
+    <span class="pill" id="countpill"><span class="dot"></span><span id="counttext">…</span></span>
+  </header>
+
+  <div id="skybox">
+    <canvas id="sky"></canvas>
+    <div class="skyhint">click a cluster to read its life</div>
+    <div id="card" role="dialog" aria-label="entity summary"></div>
+  </div>
+
+  <footer>anima · many biographies · one sky</footer>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = s => { const d = document.createElement("span");
+                   d.textContent = s == null ? "" : String(s);
+                   return d.innerHTML; };
+const fmtTs = t => { try { return new Date(t * 1000)
+  .toISOString().replace("T", " ").slice(0, 19); } catch (e) { return ""; } };
+
+/* deterministic star layout — same FNV hash as the single-entity
+   constellation: the same biography always draws the same cluster */
+function fnv(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+let SKY = { peers: [], edges: [] };
+let clusters = [];          /* computed layout: {peer, cx, cy, r, stars} */
+let selected = -1;
+
+async function poll() {
+  try {
+    const r = await fetch("/api/sky");
+    if (!r.ok) throw new Error(r.status);
+    SKY = await r.json();
+    const up = SKY.peers.filter(p => p.reachable).length;
+    $("counttext").textContent =
+      up + "/" + SKY.peers.length + " entities shining";
+    layout();
+  } catch (e) {
+    $("counttext").textContent = "sky unreachable";
+  }
+}
+
+/* ── layout: clusters on a loose ring, stars hashed within ── */
+function layout() {
+  const cv = $("sky");
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 480;
+  const n = SKY.peers.length;
+  clusters = SKY.peers.map((p, i) => {
+    const h = fnv(p.name || p.url);
+    let cx, cy;
+    if (n === 1) { cx = W / 2; cy = H / 2; }
+    else {
+      const ang = (i / n) * 2 * Math.PI - Math.PI / 2 +
+                  ((h & 0xff) / 255 - .5) * .25;
+      cx = W / 2 + Math.cos(ang) * W * .30;
+      cy = H / 2 + Math.sin(ang) * H * .28;
+    }
+    const lin = p.lineage || [];
+    const R = Math.min(W, H) * (.10 + Math.min(.08, lin.length * .004));
+    const stars = lin.map((l, j) => {
+      const sh = fnv((l.ts||"") + "|" + (l.kind||"") + "|" + (l.detail||""));
+      const a = ((sh & 0xffff) / 65535) * 2 * Math.PI;
+      const rr = Math.sqrt(((sh >>> 16) & 0xffff) / 65535) * R;
+      return { x: cx + Math.cos(a) * rr, y: cy + Math.sin(a) * rr,
+               kind: l.kind };
+    });
+    return { peer: p, cx, cy, r: R, stars };
+  });
+}
+
+/* ── draw loop: pulse rate is drive heat; unreachable stars are dim
+   and still — liveness is legible at a glance ── */
+function heatOf(p) {
+  const ds = p.drives || [];
+  if (!ds.length) return 0;
+  if (ds.some(d => d.pending)) return 1;
+  return Math.max(...ds.map(d => Math.max(0, Math.min(1, d.fraction||0))));
+}
+function draw(t) {
+  const cv = $("sky");
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 480;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  /* migration edges FIRST — under the clusters: warm threads that
+     make several biographies one sky */
+  for (const e of (SKY.edges || [])) {
+    const a = clusters.find(c => c.peer.name === e.from);
+    const b = clusters.find(c => c.peer.name === e.to);
+    if (!a || !b) continue;
+    const mx = (a.cx + b.cx) / 2, my = (a.cy + b.cy) / 2;
+    const dx = b.cx - a.cx, dy = b.cy - a.cy;
+    const len = Math.hypot(dx, dy) || 1;
+    const bow = Math.min(48, len * .18);
+    const qx = mx - (dy / len) * bow, qy = my + (dx / len) * bow;
+    ctx.strokeStyle = "rgba(255,180,94,.32)";
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([5, 6]);
+    ctx.lineDashOffset = -(t / 90) % 11;
+    ctx.shadowColor = "rgba(255,180,94,.5)"; ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(a.cx, a.cy);
+    ctx.quadraticCurveTo(qx, qy, b.cx, b.cy);
+    ctx.stroke();
+    ctx.setLineDash([]); ctx.shadowBlur = 0;
+  }
+
+  clusters.forEach((c, ci) => {
+    const p = c.peer, live = p.reachable;
+    const heat = live ? heatOf(p) : 0;
+    /* pulse: calm 5s breath at zero heat → urgent 1.4s at full;
+       unreachable clusters do not breathe at all */
+    const period = 5000 - 3600 * heat;
+    const pulse = live ? .5 + .5 * Math.sin(t / period * 2 * Math.PI)
+                       : 0;
+    /* halo */
+    const halo = ctx.createRadialGradient(c.cx, c.cy, 0,
+                                          c.cx, c.cy, c.r * 1.35);
+    const hue = live ? (heat > .85 ? "255,180,94" : "94,234,212")
+                     : "109,138,134";
+    halo.addColorStop(0, "rgba(" + hue + "," +
+      (live ? (.10 + .10 * pulse + .06 * heat).toFixed(3) : ".035") + ")");
+    halo.addColorStop(1, "rgba(" + hue + ",0)");
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(c.cx, c.cy, c.r * 1.35, 0, 7); ctx.fill();
+
+    /* the cluster's stars: its lineage */
+    for (const s of c.stars) {
+      const warm = (s.kind === "init" || s.kind === "migration");
+      const faint = (s.kind === "shell_stop");
+      ctx.shadowColor = live
+        ? (warm ? "rgba(255,180,94,.9)" : "rgba(94,234,212,.9)")
+        : "rgba(109,138,134,.4)";
+      ctx.shadowBlur = live ? (warm ? 9 : faint ? 2 : 6) : 1;
+      ctx.fillStyle = live
+        ? (warm ? "#ffb45e" : faint ? "rgba(109,138,134,.7)" : "#5eead4")
+        : "rgba(109,138,134,.55)";
+      const r = (warm ? 2.6 : faint ? 1.1 : 1.8) *
+                (live ? (1 + .18 * pulse) : 1);
+      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, 7); ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+
+    /* selection ring */
+    if (ci === selected) {
+      ctx.strokeStyle = "rgba(127,212,255,.5)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath(); ctx.arc(c.cx, c.cy, c.r + 10, 0, 7); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    /* name label — the cluster is addressable, not anonymous */
+    ctx.font = "italic 13px Georgia, serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = live ? "rgba(201,220,216,.85)"
+                         : "rgba(109,138,134,.6)";
+    ctx.shadowColor = "rgba(3,8,9,.9)"; ctx.shadowBlur = 4;
+    ctx.fillText(p.name || "?", c.cx, c.cy + c.r + 20);
+    if (!live) {
+      ctx.font = "9px ui-monospace, monospace";
+      ctx.fillStyle = "rgba(255,141,157,.55)";
+      ctx.fillText("unreachable", c.cx, c.cy + c.r + 33);
+    }
+    ctx.shadowBlur = 0;
+  });
+
+  requestAnimationFrame(draw);
+}
+
+/* ── cluster card ── */
+function ageOf(p) {
+  const lin = p.lineage || [];
+  const first = lin.find(l => l.kind === "init") || lin[0];
+  if (!first || !first.ts) return null;
+  const born = Date.parse(first.ts);
+  if (isNaN(born)) return null;
+  const days = (Date.now() - born) / 86400000;
+  if (days < 1) return (days * 24).toFixed(1) + " hours";
+  if (days < 60) return days.toFixed(1) + " days";
+  return (days / 30.44).toFixed(1) + " months";
+}
+function showCard(ci) {
+  selected = ci;
+  const c = clusters[ci];
+  if (!c) { $("card").classList.remove("shown"); return; }
+  const p = c.peer, box = $("card");
+  const st = p.stats || {};
+  let h = '<button class="close" aria-label="close">×</button>' +
+    "<h3>" + esc(p.name) + "</h3>";
+  h += p.reachable
+    ? '<div class="sub">' + esc(st.lock || "live") + "</div>"
+    : '<div class="sub err">unreachable · ' +
+      esc(p.error || "no answer") +
+      (p.last_seen ? " · last seen " + esc(fmtTs(p.last_seen)) : "") +
+      "</div>";
+  const age = ageOf(p);
+  if (age) h += '<div class="row">alive <b>' + esc(age) + "</b></div>";
+  if (p.reachable)
+    h += '<div class="row">episodes <b>' + esc(st.episodes ?? "—") +
+         "</b> · beliefs <b>" + esc(st.beliefs ?? "—") +
+         "</b> · wakes <b>" + esc(st.wakes ?? "—") +
+         "</b> · ledger <b>" + esc(st.ledger ?? "—") + "</b></div>";
+  for (const d of (p.drives || [])) {
+    const fr = Math.max(0, Math.min(1, d.fraction || 0));
+    const hot = fr >= .85 || d.pending;
+    h += '<div class="dbar' + (hot ? " hot" : "") + '">' +
+      '<span class="nm">' + esc(d.name) + "</span>" +
+      '<span class="tr"><span class="fl" style="width:' +
+      (fr * 100).toFixed(0) + '%"></span></span>' +
+      '<span class="pv">' + (d.pressure || 0).toFixed(1) + "</span></div>";
+  }
+  if (p.expression && p.expression.body) {
+    h += '<div class="xwrap" id="cardexpr"></div>' +
+         '<div class="xcap">' +
+         esc(p.expression.title || p.expression.kind) +
+         (p.expression.ts ? " · " + esc(fmtTs(p.expression.ts)) : "") +
+         "</div>";
+  }
+  h += '<a class="visit" href="' +
+    encodeURI(p.url) + '/" target="_blank" rel="noopener noreferrer">' +
+    "open this entity's observatory →</a>";
+  box.innerHTML = h;
+  const xw = box.querySelector("#cardexpr");
+  if (xw && p.expression) {
+    if (p.expression.kind === "tone") {
+      /* tones show as their meta line here; the peer's own
+         Observatory is the place to play them */
+      xw.textContent = "♪ a tone — open the observatory to play it";
+    } else {
+      xw.innerHTML = p.expression.body;  /* re-sanitized by the sky
+                                            server before serving */
+    }
+  }
+  box.querySelector(".close").addEventListener("click", () => {
+    selected = -1; box.classList.remove("shown");
+  });
+  box.classList.add("shown");
+}
+
+$("sky").addEventListener("click", ev => {
+  const box = ev.target.getBoundingClientRect();
+  const mx = ev.clientX - box.left, my = ev.clientY - box.top;
+  let best = -1, bd = Infinity;
+  clusters.forEach((c, i) => {
+    const d = Math.hypot(c.cx - mx, c.cy - my);
+    if (d < c.r + 24 && d < bd) { bd = d; best = i; }
+  });
+  if (best < 0) { selected = -1; $("card").classList.remove("shown"); }
+  else showCard(best);
+});
+window.addEventListener("resize", layout);
+
+poll(); setInterval(poll, 5000);
+requestAnimationFrame(draw);   /* one draw loop, started once */
+</script>
+</body>
+</html>
+"""
+
+
+def render_sky_page(title: str) -> str:
+    """Fill the shared-sky template (same marker-replace discipline as
+    render_page — the CSS is full of braces)."""
+    safe = (title or "the shared sky").replace("<", "").replace(">", "")
+    safe = (safe.replace("\\", "").replace('"', "").replace("'", "")
+            .replace("`", ""))
+    return SKY_TEMPLATE.replace("__TITLE__", safe)
+
+
 def render_page(entity_name: str) -> str:
     """Fill the page template. (No str.format — the CSS is full of
     braces; a plain marker replace is the honest tool here.)"""
