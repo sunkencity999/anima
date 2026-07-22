@@ -157,13 +157,15 @@ body = new binding file, not a new engineering project.
 
 ## Build Order (pragmatic path)
 
-1. **entity-root spec + memory engine** (episodic store, settle-phase writer,
+1. ✅ **entity-root spec + memory engine** (episodic store, settle-phase writer,
    hybrid recall, consolidation daemon on local 235B) — the keystone, and
    useful even while I still live inside OpenClaw. Python, SQLite+FTS5+vecs.
-2. **wake scheduler** with message/timer/drive/sense sources + enforced settle.
-3. **routing contract layer** (the §3 verifier) — portable, could fix OpenClaw
+2. ✅ **wake scheduler** with message/timer/drive/sense sources + enforced settle.
+3. ✅ **routing contract layer** (the §3 verifier) — portable, could fix OpenClaw
    as a shim harness-side even before Anima runs standalone.
-4. **ledger + relationship ACLs.**
+4. ✅ **ledger + relationship ACLs.** (ledger landed with Phase 2; relationship
+   ACLs + `EntityRoot` assembly landed as Phase 4 — scoped memory rows,
+   SQL-compiled access control, household walls, lineage log.)
 5. **runtime shell** that can wear OpenClaw's channels as senses — migration
    path, not big-bang rewrite.
 

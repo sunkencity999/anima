@@ -13,9 +13,12 @@ a valid no-op wake):
       "ts": 1784000000.0,                     # defaults to now
       "events": [                             # what happened
         {"summary": "...", "detail": "...", "kind": "event",
-         "actors": ["Christopher"], "tags": ["anima"]},
+         "actors": ["Christopher"], "tags": ["anima"],
+         "scope": "private", "owner": "antonia"},   # Phase 4, optional
         "bare strings are accepted too",
       ],
+      "scope": "shared", "owner": null,       # report-level defaults
+                                              # for events lacking their own
       "decisions": ["...", {"summary": "...", ...}],   # kind=decision
       "learnings": ["...", {"summary": "...", ...}],   # kind=learning
                                               # → also queued for consolidation
@@ -34,16 +37,21 @@ from typing import Any, Optional, Union
 from .store import MemoryStore
 
 
-def _normalize(item: Union[str, dict], default_kind: str) -> dict:
+def _normalize(item: Union[str, dict], default_kind: str,
+               default_scope: str = "shared",
+               default_owner: Optional[str] = None) -> dict:
     if isinstance(item, str):
         return {"summary": item, "detail": "", "kind": default_kind,
-                "actors": [], "tags": []}
+                "actors": [], "tags": [],
+                "scope": default_scope, "owner": default_owner}
     out = dict(item)
     out.setdefault("summary", out.get("detail", "")[:120] or "(no summary)")
     out.setdefault("detail", "")
     out.setdefault("kind", default_kind)
     out.setdefault("actors", [])
     out.setdefault("tags", [])
+    out.setdefault("scope", default_scope)
+    out.setdefault("owner", default_owner)
     return out
 
 
@@ -55,16 +63,20 @@ def settle(store: MemoryStore, wake_report: dict[str, Any]) -> dict:
     wake_id = wake_report.get("wake_id") or f"wake-{uuid.uuid4().hex[:12]}"
     ts: Optional[float] = wake_report.get("ts")
     base_ts = ts if ts is not None else time.time()
+    # Phase 4: report-level scope/owner defaults, overridable per event.
+    default_scope = wake_report.get("scope", "shared")
+    default_owner = wake_report.get("owner")
 
     episode_ids: list[int] = []
     queued_ids: list[int] = []
 
     def write(item: Union[str, dict], default_kind: str) -> int:
-        ev = _normalize(item, default_kind)
+        ev = _normalize(item, default_kind, default_scope, default_owner)
         eid = store.add_episode(
             summary=ev["summary"], detail=ev["detail"], kind=ev["kind"],
             actors=ev["actors"], tags=ev["tags"], wake_id=wake_id,
             ts=ev.get("ts", base_ts),
+            scope=ev["scope"], owner=ev["owner"],
         )
         episode_ids.append(eid)
         return eid
@@ -76,7 +88,7 @@ def settle(store: MemoryStore, wake_report: dict[str, Any]) -> dict:
         write(item, "decision")
 
     for item in wake_report.get("learnings", []) or []:
-        ev = _normalize(item, "learning")
+        ev = _normalize(item, "learning", default_scope, default_owner)
         eid = write(ev, "learning")
         # Learnings are semantic candidates: queue for consolidation with
         # provenance pointing at the episode we just wrote.
@@ -95,6 +107,7 @@ def settle(store: MemoryStore, wake_report: dict[str, Any]) -> dict:
             summary=f"drive satisfactions: {summary}",
             kind="drive", tags=["drive"] + sorted(drives.keys()),
             wake_id=wake_id, ts=base_ts,
+            scope=default_scope, owner=default_owner,
         )
         episode_ids.append(eid)
 

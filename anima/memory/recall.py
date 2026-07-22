@@ -18,11 +18,27 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Iterable, Optional
+import warnings
+from typing import Any, Iterable, Optional
 
 from .store import MemoryStore
 
 LN2 = math.log(2)
+
+# Emitted once per process when recall runs without an AccessContext.
+_ACLLESS_WARNED = False
+
+
+def _warn_aclless() -> None:
+    global _ACLLESS_WARNED
+    if not _ACLLESS_WARNED:
+        _ACLLESS_WARNED = True
+        warnings.warn(
+            "ACL-less recall — single-user mode. Pass access_context to "
+            "enforce relationship privacy walls (ARCHITECTURE.md §5).",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def _approx_tokens(text: str) -> int:
@@ -65,17 +81,41 @@ def recall(
     keyword_weight: float = 0.7,
     recency_weight: float = 0.3,
     now: Optional[float] = None,
+    access_context: Optional[Any] = None,
+    relationships: Optional[Any] = None,
 ) -> str:
-    """Return a markdown context pack for prompt injection."""
+    """Return a markdown context pack for prompt injection.
+
+    When access_context (an anima.relationships.AccessContext) is given,
+    the compiled ACL WHERE clause is applied inside every sqlite query
+    (episodic, semantic, procedural) — rows outside the context's
+    visibility never leave the database. `relationships` (a
+    RelationshipStore) supplies household membership; without it the
+    household set is empty and household-scoped rows stay hidden.
+
+    When access_context is None, behavior is exactly pre-Phase-4
+    (single-user mode) and a UserWarning is emitted once per process.
+    """
     now = now if now is not None else time.time()
     actor_set = {a.lower() for a in actors} if actors else None
     tag_set = {t.lower() for t in tags} if tags else None
 
+    acl = None
+    if access_context is not None:
+        # Imported lazily so anima.memory stays importable standalone.
+        from ..relationships.acl import compile_acl
+        household = (relationships.household_members()
+                     if relationships is not None else frozenset())
+        acl = compile_acl(access_context, household)
+    else:
+        _warn_aclless()
+
     # ── episodes: hybrid rank ─────────────────────────────────────────
-    candidates = store.search_episodes(query, limit=max_items * 4)
+    candidates = store.search_episodes(query, limit=max_items * 4, acl=acl)
     if not candidates and (actor_set or tag_set):
         # No keyword hits: fall back to recent episodes matching filters.
-        candidates = [dict(e, score=0.0) for e in store.recent_episodes(max_items * 4)]
+        candidates = [dict(e, score=0.0)
+                      for e in store.recent_episodes(max_items * 4, acl=acl)]
 
     ranked = []
     for ep in candidates:
@@ -89,14 +129,14 @@ def recall(
 
     # ── beliefs: keyword match, active/stale only ─────────────────────
     beliefs = [
-        b for b in store.search_beliefs(query, limit=max_items)
+        b for b in store.search_beliefs(query, limit=max_items, acl=acl)
         if b["status"] != "contradicted" and _matches_filters(b, None, tag_set)
     ]
 
     # ── skills: name/description keyword overlap ──────────────────────
     q_tokens = {t.lower() for t in query.split()}
     skills = [
-        s for s in store.list_skills()
+        s for s in store.list_skills(acl=acl)
         if q_tokens & {w.lower() for w in (s["name"].replace("-", " ").replace("_", " ")
                                            + " " + s["description"]).split()}
     ][:5]
@@ -151,3 +191,8 @@ def recall(
     if len(lines) <= 2:
         lines.append("_No relevant memories._")
     return "\n".join(lines).rstrip() + "\n"
+
+
+# Canonical Phase-4 name: the recall result IS a context pack, and the
+# access_context parameter is where the privacy walls attach.
+build_context_pack = recall

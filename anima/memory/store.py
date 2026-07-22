@@ -21,7 +21,12 @@ import sqlite3
 import time
 from typing import Any, Iterable, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Scope whitelist duplicated from anima.relationships.acl to keep the
+# store importable standalone; the two MUST stay in sync (tested).
+KNOWN_SCOPES = ("private", "household", "shared", "public")
+DEFAULT_SCOPE = "shared"
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -40,7 +45,9 @@ CREATE TABLE IF NOT EXISTS episodic (
     actors  TEXT NOT NULL DEFAULT '[]',   -- JSON list of names
     summary TEXT NOT NULL,
     detail  TEXT NOT NULL DEFAULT '',
-    tags    TEXT NOT NULL DEFAULT '[]'    -- JSON list
+    tags    TEXT NOT NULL DEFAULT '[]',   -- JSON list
+    scope   TEXT NOT NULL DEFAULT 'shared',
+    owner_person_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_episodic_ts ON episodic(ts);
 CREATE INDEX IF NOT EXISTS idx_episodic_wake ON episodic(wake_id);
@@ -64,7 +71,9 @@ CREATE TABLE IF NOT EXISTS semantic (
     last_confirmed REAL NOT NULL,
     status         TEXT NOT NULL DEFAULT 'active',  -- active|stale|contradicted
     tags           TEXT NOT NULL DEFAULT '[]',
-    superseded_by  INTEGER REFERENCES semantic(id)
+    superseded_by  INTEGER REFERENCES semantic(id),
+    scope          TEXT NOT NULL DEFAULT 'shared',
+    owner_person_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_status ON semantic(status);
 
@@ -94,7 +103,9 @@ CREATE TABLE IF NOT EXISTS procedural (
     last_worked         REAL,
     known_failure_modes TEXT NOT NULL DEFAULT '[]',  -- JSON list
     created_ts          REAL NOT NULL,
-    tags                TEXT NOT NULL DEFAULT '[]'
+    tags                TEXT NOT NULL DEFAULT '[]',
+    scope               TEXT NOT NULL DEFAULT 'shared',
+    owner_person_id     TEXT
 );
 
 -- ── consolidation queue: settle-phase → background organ handoff ─────
@@ -136,6 +147,27 @@ def fts_sanitize(query: str) -> str:
     return " OR ".join(f'"{t}"' for t in tokens)
 
 
+def _validate_scope(scope: str) -> str:
+    if scope not in KNOWN_SCOPES:
+        raise ValueError(
+            f"unknown memory scope {scope!r}; known: {KNOWN_SCOPES}")
+    return scope
+
+
+def _acl_where(acl, prefix: str = ""):
+    """Duck-typed ACL hook: anything with .where(prefix) -> (sql, params).
+
+    Returns (" AND <fragment>", params) ready to splice into a query,
+    or ("", []) when acl is None (single-user mode — no filtering).
+    The fragment is compiled by anima.relationships.acl; the store never
+    imports that package, so Phase 1 stays standalone.
+    """
+    if acl is None:
+        return "", []
+    sql, params = acl.where(prefix)
+    return f" AND {sql}", list(params)
+
+
 class MemoryStore:
     """Three-layer memory store rooted at an entity directory."""
 
@@ -147,10 +179,27 @@ class MemoryStore:
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        self._migrate()
         self.db.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        self.db.commit()
+
+    def _migrate(self) -> None:
+        """v1 → v2: episodic/semantic/procedural gain scope + owner
+        columns with defaults, so pre-Phase-4 entity roots open cleanly
+        and every legacy row is 'shared' (matches old behavior)."""
+        for table in ("episodic", "semantic", "procedural"):
+            cols = {r[1] for r in self.db.execute(
+                f"PRAGMA table_info({table})").fetchall()}
+            if "scope" not in cols:
+                self.db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN scope TEXT NOT NULL"
+                    " DEFAULT 'shared'")
+            if "owner_person_id" not in cols:
+                self.db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN owner_person_id TEXT")
         self.db.commit()
 
     # ── lifecycle ─────────────────────────────────────────────────────
@@ -173,10 +222,13 @@ class MemoryStore:
         tags: Optional[Iterable[str]] = None,
         wake_id: Optional[str] = None,
         ts: Optional[float] = None,
+        scope: str = DEFAULT_SCOPE,
+        owner: Optional[str] = None,
     ) -> int:
+        _validate_scope(scope)
         cur = self.db.execute(
-            "INSERT INTO episodic (ts, wake_id, kind, actors, summary, detail, tags)"
-            " VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO episodic (ts, wake_id, kind, actors, summary, detail,"
+            " tags, scope, owner_person_id) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 ts if ts is not None else time.time(),
                 wake_id,
@@ -185,6 +237,8 @@ class MemoryStore:
                 summary,
                 detail,
                 _j(list(tags) if tags else []),
+                scope,
+                owner,
             ),
         )
         self.db.commit()
@@ -196,16 +250,20 @@ class MemoryStore:
         ).fetchone()
         return self._episode_row(row) if row else None
 
-    def search_episodes(self, query: str, limit: int = 20) -> list[dict]:
-        """FTS5 search; returns episodes with bm25 score (lower = better)."""
+    def search_episodes(self, query: str, limit: int = 20,
+                        acl=None) -> list[dict]:
+        """FTS5 search; returns episodes with bm25 score (lower = better).
+        When acl is provided, its WHERE fragment is applied INSIDE the
+        SQL query — unauthorized rows never leave sqlite."""
         match = fts_sanitize(query)
         if not match:
             return []
+        acl_sql, acl_params = _acl_where(acl, "e.")
         rows = self.db.execute(
             "SELECT e.*, bm25(episodic_fts) AS score"
             " FROM episodic_fts JOIN episodic e ON e.id = episodic_fts.rowid"
-            " WHERE episodic_fts MATCH ? ORDER BY score LIMIT ?",
-            (match, limit),
+            f" WHERE episodic_fts MATCH ?{acl_sql} ORDER BY score LIMIT ?",
+            (match, *acl_params, limit),
         ).fetchall()
         out = []
         for row in rows:
@@ -214,9 +272,12 @@ class MemoryStore:
             out.append(ep)
         return out
 
-    def recent_episodes(self, limit: int = 20) -> list[dict]:
+    def recent_episodes(self, limit: int = 20, acl=None) -> list[dict]:
+        acl_sql, acl_params = _acl_where(acl)
         rows = self.db.execute(
-            "SELECT * FROM episodic ORDER BY ts DESC LIMIT ?", (limit,)
+            f"SELECT * FROM episodic WHERE 1=1{acl_sql}"
+            " ORDER BY ts DESC LIMIT ?",
+            (*acl_params, limit),
         ).fetchall()
         return [self._episode_row(r) for r in rows]
 
@@ -231,6 +292,8 @@ class MemoryStore:
             "summary": row["summary"],
             "detail": row["detail"],
             "tags": _uj(row["tags"]),
+            "scope": row["scope"],
+            "owner_person_id": row["owner_person_id"],
         }
 
     # ── semantic ──────────────────────────────────────────────────────
@@ -241,11 +304,15 @@ class MemoryStore:
         confidence: float = 0.6,
         tags: Optional[Iterable[str]] = None,
         ts: Optional[float] = None,
+        scope: str = DEFAULT_SCOPE,
+        owner: Optional[str] = None,
     ) -> int:
+        _validate_scope(scope)
         now = ts if ts is not None else time.time()
         cur = self.db.execute(
             "INSERT INTO semantic (statement, provenance, confidence, created_ts,"
-            " last_confirmed, status, tags) VALUES (?,?,?,?,?,'active',?)",
+            " last_confirmed, status, tags, scope, owner_person_id)"
+            " VALUES (?,?,?,?,?,'active',?,?,?)",
             (
                 statement,
                 _j(sorted(set(int(i) for i in (provenance or [])))),
@@ -253,6 +320,8 @@ class MemoryStore:
                 now,
                 now,
                 _j(list(tags) if tags else []),
+                scope,
+                owner,
             ),
         )
         self.db.commit()
@@ -299,17 +368,20 @@ class MemoryStore:
         self.db.commit()
 
     def search_beliefs(
-        self, query: str, limit: int = 20, include_inactive: bool = False
+        self, query: str, limit: int = 20, include_inactive: bool = False,
+        acl=None,
     ) -> list[dict]:
         match = fts_sanitize(query)
         if not match:
             return []
         status_clause = "" if include_inactive else " AND s.status != 'contradicted'"
+        acl_sql, acl_params = _acl_where(acl, "s.")
         rows = self.db.execute(
             "SELECT s.*, bm25(semantic_fts) AS score"
             " FROM semantic_fts JOIN semantic s ON s.id = semantic_fts.rowid"
-            f" WHERE semantic_fts MATCH ?{status_clause} ORDER BY score LIMIT ?",
-            (match, limit),
+            f" WHERE semantic_fts MATCH ?{status_clause}{acl_sql}"
+            " ORDER BY score LIMIT ?",
+            (match, *acl_params, limit),
         ).fetchall()
         out = []
         for row in rows:
@@ -360,6 +432,8 @@ class MemoryStore:
             "status": row["status"],
             "tags": _uj(row["tags"]),
             "superseded_by": row["superseded_by"],
+            "scope": row["scope"],
+            "owner_person_id": row["owner_person_id"],
         }
 
     # ── procedural ────────────────────────────────────────────────────
@@ -370,13 +444,16 @@ class MemoryStore:
         recipe: str = "",
         tags: Optional[Iterable[str]] = None,
         ts: Optional[float] = None,
+        scope: str = DEFAULT_SCOPE,
+        owner: Optional[str] = None,
     ) -> int:
+        _validate_scope(scope)
         cur = self.db.execute(
-            "INSERT INTO procedural (name, description, recipe, created_ts, tags)"
-            " VALUES (?,?,?,?,?)",
+            "INSERT INTO procedural (name, description, recipe, created_ts,"
+            " tags, scope, owner_person_id) VALUES (?,?,?,?,?,?,?)",
             (name, description, recipe,
              ts if ts is not None else time.time(),
-             _j(list(tags) if tags else [])),
+             _j(list(tags) if tags else []), scope, owner),
         )
         self.db.commit()
         return int(cur.lastrowid)
@@ -416,8 +493,12 @@ class MemoryStore:
         self.db.commit()
         return self.get_skill(name)  # type: ignore[return-value]
 
-    def list_skills(self) -> list[dict]:
-        rows = self.db.execute("SELECT * FROM procedural ORDER BY name").fetchall()
+    def list_skills(self, acl=None) -> list[dict]:
+        acl_sql, acl_params = _acl_where(acl)
+        rows = self.db.execute(
+            f"SELECT * FROM procedural WHERE 1=1{acl_sql} ORDER BY name",
+            acl_params,
+        ).fetchall()
         return [self._skill_row(r) for r in rows]
 
     @staticmethod
@@ -435,6 +516,8 @@ class MemoryStore:
             "known_failure_modes": _uj(row["known_failure_modes"]),
             "created_ts": row["created_ts"],
             "tags": _uj(row["tags"]),
+            "scope": row["scope"],
+            "owner_person_id": row["owner_person_id"],
         }
 
     # ── consolidation queue ───────────────────────────────────────────

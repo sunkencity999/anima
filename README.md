@@ -10,6 +10,10 @@ dependencies (pytest only for the test suite).
 - **Phase 3 — routing contract layer** (Build Order #3): declarative
   model routing with failover as a *verified contract*. Standalone —
   importable without the memory/wake packages.
+- **Phase 4 — relationship ACLs + entity root** (Build Order #4):
+  per-person relationship records with *structural* privacy walls
+  (scoped memory + SQL-compiled access control), and `EntityRoot`,
+  which assembles the whole organism from a directory.
 
 ## Layout
 
@@ -32,6 +36,11 @@ anima/routing/
 ├── classify.py     # provider error → retry_same / failover_next decision
 ├── router.py       # chain walker: transport → classify/contract → audited result
 └── shim.py         # python3 -m anima.routing probe ... (CLI + harness-shim doc)
+anima/relationships/
+├── context.py      # AccessContext: who is in the room (direct/group/public/system)
+├── acl.py          # scope rules compiled to SQL WHERE — the enforcement core
+└── model.py        # RelationshipStore: person records, trust, household, mirrors
+anima/entity.py     # EntityRoot: the whole organism assembled from a directory
 examples/policy.example.json  # realistic chain: azure → azure → local 8103 → ollama
 tests/              # pytest suite (python3 -m pytest)
 demo.py             # deterministic Phase 2 simulation (python3 demo.py)
@@ -287,3 +296,104 @@ Router.complete(tier, messages)
   exercised by the CLI probe.
 - See `anima/routing/shim.py`'s docstring for wrapping an *existing*
   harness's model call path with this layer as a verification shim.
+
+# Phase 4: Relationship ACLs + Entity Root (§5)
+
+The Esmeralda/Antonia lesson: per-person privacy must be **structural,
+not disciplinary**. Phase 4 makes recall from a shared context
+*physically unable* to return private-scoped memories.
+
+## Scopes and contexts
+
+Every memory row (episodic, semantic, procedural) carries a `scope`
+(`private | household | shared | public`, default `shared`) and an
+optional `owner_person_id`. Every ACL-enforced read carries an
+`AccessContext` — `{context_id, kind: direct|group|public|system,
+participants, channel}` (constructors: `AccessContext.direct(person)`,
+`.group([...])`, `.public()`, `.system()`).
+
+Visibility (whitelist; **deny by default** — a row with an unknown
+scope is dark to every person context):
+
+| scope     | visible when |
+|-----------|--------------|
+| private   | `kind == direct` AND owner ∈ participants |
+| household | ≥1 participant AND every participant is a household member |
+| shared    | any authenticated context (direct/group/system) |
+| public    | anywhere |
+
+`system` contexts (the entity's own organs: consolidation, self-audit)
+see everything — the wall is between *people*, not between the entity
+and its own mind.
+
+## Enforcement is IN the SQL
+
+`compile_acl(context, household_members)` produces a `CompiledACL`
+whose `.where(prefix)` emits a parameterized WHERE fragment; the store
+splices it into the FTS/scan queries themselves. Unauthorized rows are
+excluded by sqlite and **never cross into Python** — no ranking bug,
+rendering bug, or bad model day can leak them. The test suite proves
+it with sqlite trace callbacks and raw-cursor replays.
+
+```python
+from anima.memory.recall import build_context_pack
+from anima.relationships import AccessContext
+
+pack = build_context_pack(store, "party budget",
+                          access_context=AccessContext.group(["a", "b"]),
+                          relationships=rel_store)
+```
+
+`access_context=None` keeps exact pre-Phase-4 behavior (single-user
+mode) and emits a one-time `UserWarning`.
+
+## RelationshipStore
+
+Per-person records in `relationships/relationships.sqlite` (person_id
+is the join key): profile (name, aliases, channel handles, notes),
+trust tier (`stranger…inner`), a standing ACL declaration
+(`{scope, allowed_contexts}` — feeds *write-time* defaults; read-time
+enforcement is always the AccessContext path), and a household table.
+Every upsert mirrors a human-readable `relationships/<person>/
+profile.json` — the directory stays the agent.
+
+## EntityRoot — the directory IS the agent, runnable
+
+```python
+from anima.entity import EntityRoot
+from anima.relationships import AccessContext
+
+with EntityRoot("./entity") as e:
+    e.relationships.upsert_person("antonia")
+    e.wake_message("antonia", "my secret plan",
+                   AccessContext.direct("antonia"))   # → private episode
+    e.recall("secret plan", AccessContext.group(["antonia", "chris"]))
+    # → structurally absent
+```
+
+`EntityRoot(root)` wires MemoryStore + recall + WakeScheduler (message/
+timer/sense + drives from `identity/drives.json`) + Ledger +
+RelationshipStore + optional Router from `identity/routing.json`, and
+maintains `identity/lineage.log` — append-only biography: first init
+and every runtime-version change are recorded events. Public surface:
+`wake_message(sender, text, context)`, `recall(query, context)`,
+`settle(report)`, `stats()`.
+
+## Phase 4 design decisions beyond spec
+
+- **Contextual auto-scoping on write:** the default message handler
+  scopes direct-context messages `private/owner=sender` — what someone
+  tells you one-on-one is theirs by default; escalation to shared is a
+  deliberate act, never a default.
+- **Household is granted only when there ARE participants** — `all()`
+  over an empty set is vacuously true and would have granted household
+  scope to anonymous rooms.
+- **The store never imports the relationships package.** ACL objects
+  are duck-typed (`.where(prefix)`), so Phase 1 stays standalone and
+  the dependency arrow points one way.
+- **v1→v2 migration is ALTER TABLE with defaults** (`scope='shared'`),
+  so pre-Phase-4 entity roots open unchanged and legacy rows behave
+  exactly as before.
+- **Write-time scope validation** (`ValueError` on unknown scopes) plus
+  read-time deny-by-default: even a corrupted row with `scope='banana'`
+  is invisible to every person context.
