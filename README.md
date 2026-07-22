@@ -28,11 +28,60 @@ dependencies (pytest only for the test suite).
   plus an `express` tool that lets the entity *draw* — sanitized
   HTML/SVG fragments rendered as cards.
 
+## Quickstart: a home agent in four commands
+
+```bash
+pipx install .                              # console script: anima
+anima init ~/entities/me                    # scaffold an entity root
+anima service install --root ~/entities/me  # systemd user service:
+                                            #   starts at boot, restarts
+                                            #   on crash, web GUI on
+# → open http://<server-lan-ip>:8762/ and say hello
+```
+
+### Say hello 👋
+
+Once the entity is running with the web sense (`anima service install`
+above, or a foreground `anima run --root ~/entities/me --web`), open:
+
+```
+http://<server-lan-ip>:8762/
+```
+
+from **any device on your home network** — phone, laptop, tablet. No
+app, no login, no token: the Observatory is open to the LAN by
+default, because a home agent you can't casually greet isn't a
+companion. The startup log prints the resolved LAN URL; on a headless
+box you can also find the address with:
+
+```bash
+hostname -I | awk '{print $1}'
+```
+
+(Running as a service? `journalctl --user -u anima-me -f` shows the
+startup line.) Type into the chat panel — you are speaking as the
+configured `operator_person`, and the entity's recalled memories
+surface as marginalia beside the dialogue while it composes.
+
+**The honest caveat:** open mode means *anyone who can reach your LAN*
+sees the operator view — the chat, the ledger, and memory search
+including recalled memories. On a home network you trust, that is the
+point. If your network is shared (roommates, an open guest Wi-Fi, a
+dorm), switch that entity to token mode — one line in
+`<root>/senses/web.json`:
+
+```json
+{"auth": "token", "token": "<any long random string>"}
+```
+
+(or scaffold gated from the start: `anima init ~/entities/me --auth
+token`). Then the page locks until you visit `/?token=<token>` once.
+
 ## Phase 6b: the Observatory
 
 ```bash
 anima run --root ~/entities/me --web
-# observatory: http://127.0.0.1:8762/?token=…  (token in senses/web.json)
+# observatory: http://<lan-ip>:8762/  (open — anyone on the LAN can say hello)
 ```
 
 The Observatory is ARCHITECTURE.md §6 made visible: *oversight is a
@@ -136,14 +185,19 @@ anima sky --config ~/skies/home.json          # default port 8763
 
 ```json
 {
-  "port": 8763, "bind": "0.0.0.0", "token": "<sky token>",
+  "port": 8763, "bind": "0.0.0.0", "auth": "open",
   "poll_s": 10, "timeout_s": 4, "title": "the shared sky",
   "peers": [
-    {"name": "luna", "url": "http://host-a:8762", "token": "<luna's web token>"},
+    {"name": "luna", "url": "http://host-a:8762"},
     {"name": "nova", "url": "http://host-b:8762", "token": "<nova's web token>"}
   ]
 }
 ```
+
+(Open-mode peers need no `token`; add one for peers that run
+`"auth": "token"`. Gate the sky page itself with `"auth": "token"` +
+a `"token"` at the top level — same caveat as the Observatory: open
+means anyone on the LAN sees the constellation.)
 
 A small stdlib aggregator (`anima/runtime/sky.py`) polls each peer's
 *existing* read-only Observatory API and serves one page: a shared
@@ -160,12 +214,15 @@ memory/wake/ledger counts, live drive bars, its latest expression,
 and a link to that entity's own Observatory. Unreachable peers dim to
 a still grey cluster with an *unreachable* note — never a broken page.
 
-Security model: the sky page has its **own token** (same
-cookie/bearer/query scheme as the web sense); **peer tokens live only
-in the sky config and are used server-side** — they are never included
-in `/api/sky` responses or the page. Peer URLs *are* shipped (for the
-card link), but a sky viewer still needs each peer's token to get past
-its lock page: observing the sky grants no new authority. Peer-served
+Security model: the sky page is **open by default** (home-mode, like
+the Observatory); `"auth": "token"` gives it its own token gate (same
+cookie/bearer/query scheme as the web sense). **Peer tokens — when a
+peer has one — live only in the sky config and are used server-side**:
+they are never included in `/api/sky` responses or the page, and the
+aggregator only sends an Authorization header to peers with a
+configured token. Peer URLs *are* shipped (for the card link), but a
+sky viewer still needs a token-gated peer's token to get past its lock
+page: observing the sky grants no new authority. Peer-served
 expression bodies are re-sanitized by the aggregator before serving,
 so a compromised peer cannot inject into the sky page.
 
@@ -195,14 +252,21 @@ tool now takes exactly one of `html`, `svg`, or `tone`:
   amber as its note sounds. Existing grid/HTML expressions are
   untouched; all three media arrive in the feed with the same bloom.
 
-- **Auth**: hit any URL with `?token=<token>` once → HttpOnly cookie;
-  every `/api/*` route requires cookie, bearer header, or query token.
+- **Auth**: **open by default** (home-mode, owner decision
+  2026-07-22) — every request is authorized as `operator_person`, no
+  cookie, no lock page. The Phase 4 ACL wall still applies: open ≠
+  omniscient; other people's private rows stay structurally invisible
+  even to the operator view. Set `"auth": "token"` + a `"token"` for
+  the browser-shaped gate: hit any URL with `?token=<token>` once →
+  HttpOnly cookie; every `/api/*` route then requires cookie, bearer
+  header, or query token. Back-compat: a pre-`auth` config with a
+  token keeps token behavior.
 - **Config**: `senses/web.json` — `{"port": 8762, "bind": "0.0.0.0",
-  "token": "…", "operator_person": "…"}` (scaffolded by `anima init`
-  with a random token). LAN-exposed by default — the token is the
-  gate; set `"bind": "127.0.0.1"` (or pass `--bind 127.0.0.1`) for
-  loopback-only. `anima run` also accepts `--bind` / `--web-port`
-  overrides so nothing requires editing JSON.
+  "auth": "open", "operator_person": "…"}` (scaffolded by `anima
+  init`; `--auth token` scaffolds the gated variant with a random
+  token). LAN-exposed by default; set `"bind": "127.0.0.1"` (or pass
+  `--bind 127.0.0.1`) for loopback-only. `anima run` also accepts
+  `--bind` / `--web-port` overrides so nothing requires editing JSON.
 
 ## Phase 6a: install + CLI + Telegram
 
@@ -215,7 +279,8 @@ pipx install .              # console script: anima
 # dev checkout alternative:  pip install -e .  (inside a venv)
 
 anima init ~/entities/me    # scaffold an entity root (refuses to
-                            # overwrite existing identity files)
+                            # overwrite existing identity files;
+                            # --auth token for a gated Observatory)
 anima status --root ~/entities/me   # memory / drives / lineage / lock
 anima run --root ~/entities/me --console
 anima sync ~/entities/me /mnt/newhome/me   # MIGRATION, not cloning:
@@ -225,16 +290,55 @@ anima sync ~/entities/me /mnt/newhome/me   # MIGRATION, not cloning:
                             # it), and warns that forks diverge.
 ```
 
-### Deployment: the Observatory as a real service
+### Deployment: `anima service` (the harness way)
 
-`anima run --web` is a foreground process; to serve the Observatory
-permanently from a server, wrap it in a systemd **user** unit
-(survives logout with `loginctl enable-linger $USER`):
+An entity that dies with the terminal isn't a companion, it's a demo.
+`anima service` wraps `anima run` in a systemd **user** unit with
+harness-grade resiliency: auto-start at boot, auto-restart on crash
+(`Restart=on-failure`, 5s backoff), logs in the journal.
+
+```bash
+anima service install --root ~/entities/me     # web GUI on by default
+#   --name luna       service name (default: root basename → anima-me)
+#   --telegram        also attach the Telegram sense
+#   --no-web          headless (no Observatory)
+#   --force           regenerate an existing unit
+
+anima service status  --root ~/entities/me
+anima service restart --root ~/entities/me
+anima service stop    --root ~/entities/me
+anima service uninstall --root ~/entities/me   # disable + remove unit
+
+journalctl --user -u anima-me -f    # ledger + the say-hello URL
+```
+
+`install` writes `~/.config/systemd/user/anima-<name>.service`,
+daemon-reloads, enables and starts it, and checks user lingering —
+without lingering, user services die at logout and don't start at
+boot. It attempts `loginctl enable-linger $USER` for you and prints
+the exact `sudo` command if that needs privileges.
+
+Notes:
+- The startup line in the journal prints the reachable URL (LAN IP
+  resolved when bound to `0.0.0.0`).
+- One entity per root: the runtime pidfile-locks the root, so a second
+  service on the same root refuses to start (by design — it's a body,
+  not a load-balanced app).
+- For internet exposure put a TLS reverse proxy (nginx/caddy) in
+  front — and use token mode: open mode on the internet is not a home,
+  it's a billboard. Plain HTTP on an open network is still plain HTTP.
+
+#### Deployment appendix: without systemd
+
+`anima service` detects non-systemd platforms and refuses cleanly. The
+manual recipe is any supervisor that restarts a foreground process,
+e.g. the classic unit it would have written (adapt for launchd/runit/
+OpenRC as needed):
 
 ```ini
-# ~/.config/systemd/user/anima-observatory.service
+# ~/.config/systemd/user/anima-me.service
 [Unit]
-Description=ANIMA entity + Observatory web GUI
+Description=ANIMA entity: me
 After=network-online.target
 
 [Service]
@@ -248,19 +352,8 @@ WantedBy=default.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now anima-observatory.service
-journalctl --user -u anima-observatory -f   # ledger + URL in the log
+systemctl --user enable --now anima-me.service
 ```
-
-Notes:
-- The startup line prints the reachable URL (LAN IP resolved when
-  bound to `0.0.0.0`); the token lives in `<root>/senses/web.json`.
-- One entity per root: the runtime pidfile-locks the root, so a second
-  service on the same root refuses to start (by design — it's a body,
-  not a load-balanced app).
-- For internet exposure put a TLS reverse proxy (nginx/caddy) in
-  front; the token cookie is HttpOnly but plain HTTP on an open
-  network is still plain HTTP.
 
 **Telegram sense** (`anima run --root R --telegram`): pure-stdlib Bot
 API long polling — no SDK. Configure `R/senses/telegram.json`:
