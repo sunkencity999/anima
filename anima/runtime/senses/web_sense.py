@@ -62,7 +62,7 @@ from ...relationships.acl import compile_acl
 from ...memory.recall import recall_items
 from ...wake.orient import derive_query
 from ..observatory import LOCK_PAGE, render_page
-from ..sanitize import sanitize_fragment
+from ..sanitize import resanitize_expression
 
 _MAX_BODY = 256 * 1024
 _COOKIE = "anima_observatory"
@@ -280,7 +280,7 @@ class WebSense:
                     rows = sense._locked(
                         entity.store.recent_expressions, limit)
                     for row in rows:  # defense in depth: re-sanitize
-                        row["body"] = sanitize_fragment(row["body"])
+                        resanitize_expression(row)
                     return self._json(200, {"expressions": rows})
 
                 if path == "/api/stats":
@@ -346,7 +346,7 @@ class WebSense:
                                  if x["id"] not in seen_expr]
                         if new_x or first:
                             for x in xs:
-                                x["body"] = sanitize_fragment(x["body"])
+                                resanitize_expression(x)
                             seen_expr.update(x["id"] for x in xs)
                             emit("expressions", {"expressions": xs,
                                                  "initial": first})

@@ -181,6 +181,23 @@ header .spacer { flex: 1; }
 .card .cap .when { font-family: var(--mono); font-size: 9.5px;
   color: var(--ink-faint); }
 
+/* ── tone expressions (v3b): sound as data ──
+   The piano-roll is the instrument view of the entity's phrase; the
+   play button lights the bars amber as the notes actually sound.
+   Nothing here is a decoration — every bar is a validated note. */
+.tonewrap { padding: 2px 0 4px; }
+.tonewrap svg { display: block; width: 100%; height: auto; }
+.tonebar { fill: var(--glow); opacity: .75;
+  transition: fill .15s, opacity .15s; }
+.tonebar.on { fill: var(--lamp); opacity: 1;
+  filter: drop-shadow(0 0 5px rgba(255,180,94,.9)); }
+.tonefoot { display: flex; align-items: center; gap: 10px;
+  margin-top: 8px; }
+.toneplay { width: 34px; height: 34px; min-height: 34px; padding: 0;
+  border-radius: 50%; font-size: 13px; line-height: 1; flex: none; }
+.tonemeta { font-family: var(--mono); font-size: 9.5px;
+  color: var(--ink-faint); letter-spacing: .08em; }
+
 /* ── conversation: the centerpiece ──
    .convo grows a marginalia column (recalled memories) when the
    entity is composing; otherwise the dialogue takes the full width. */
@@ -656,7 +673,15 @@ function renderExpressions(doc, initial) {
     card.className = "card";
     const body = document.createElement("div");
     body.className = "body";
-    body.innerHTML = x.body;               /* sanitized server-side */
+    if (x.kind === "tone") {
+      const t = buildToneBody(x.body);     /* validated server-side;
+                                              rebuilt as DOM here */
+      if (t) body.appendChild(t);
+      else body.innerHTML = '<span class="empty">(a tone that did not '
+                          + 'survive validation)</span>';
+    } else {
+      body.innerHTML = x.body;             /* sanitized server-side */
+    }
     const cap = document.createElement("div");
     cap.className = "cap";
     cap.innerHTML = '<span class="t">' + esc(x.title || x.kind) + "</span>" +
@@ -672,6 +697,99 @@ function renderExpressions(doc, initial) {
 }
 async function pollExpressions() {
   renderExpressions(await api("/api/expressions?limit=20"), firstPaint);
+}
+
+/* ── tone rendering + playback (v3b) ──
+   The body is canonical validated JSON ({tempo, wave, notes:[{pitch,
+   dur, vel}]}) — sound as data. The card shows a piano-roll built
+   entirely from those numbers (DOM-built, nothing injected) and a
+   play button that synthesizes the phrase with WebAudio, lighting
+   each bar as its note sounds. */
+const midiHz = m => 440 * Math.pow(2, (m - 69) / 12);
+let audioCtx = null;
+function buildToneBody(bodyStr) {
+  let doc;
+  try { doc = JSON.parse(bodyStr); } catch (e) { return null; }
+  if (!doc || doc.medium !== "tone" ||
+      !Array.isArray(doc.notes) || !doc.notes.length) return null;
+  const W = 260, H = 88, pad = 6;
+  const total = doc.notes.reduce((s, n) => s + (n.dur || 0), 0) || 1;
+  const ps = doc.notes.filter(n => n.pitch != null).map(n => n.pitch);
+  const lo = ps.length ? Math.min(...ps) - 2 : 57;
+  const hi = ps.length ? Math.max(...ps) + 2 : 81;
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  let x = pad, bars = [];
+  for (const n of doc.notes) {
+    const w = Math.max(2, (n.dur / total) * (W - 2 * pad) - 1.5);
+    if (n.pitch != null) {
+      const y = pad + (1 - (n.pitch - lo) / (hi - lo)) * (H - 2 * pad - 6);
+      const r = document.createElementNS(NS, "rect");
+      r.setAttribute("x", x.toFixed(1));
+      r.setAttribute("y", y.toFixed(1));
+      r.setAttribute("width", w.toFixed(1));
+      r.setAttribute("height", "6"); r.setAttribute("rx", "3");
+      r.setAttribute("class", "tonebar");
+      r.style.opacity = (0.35 + 0.55 * (n.vel == null ? 0.7 : n.vel))
+                        .toFixed(2);
+      svg.appendChild(r); bars.push(r);
+    } else bars.push(null);                /* rest: silence has no bar */
+    x += (n.dur / total) * (W - 2 * pad);
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "tonewrap";
+  wrap.appendChild(svg);
+  const secs = total * 60 / doc.tempo;
+  const foot = document.createElement("div");
+  foot.className = "tonefoot";
+  const btn = document.createElement("button");
+  btn.type = "button"; btn.className = "toneplay";
+  btn.textContent = "\u25B6";
+  btn.setAttribute("aria-label", "play tone");
+  const meta = document.createElement("span");
+  meta.className = "tonemeta";
+  meta.textContent = doc.wave + " \u00B7 " + doc.tempo + " bpm \u00B7 "
+    + doc.notes.length + " notes \u00B7 " + secs.toFixed(1) + "s";
+  foot.appendChild(btn); foot.appendChild(meta);
+  wrap.appendChild(foot);
+  btn.addEventListener("click", () => playTone(doc, bars, btn));
+  return wrap;
+}
+function playTone(doc, bars, btn) {
+  if (btn.disabled) return;
+  try {
+    audioCtx = audioCtx ||
+      new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (e) { return; }
+  btn.disabled = true; btn.textContent = "\u25CF";
+  const spb = 60 / doc.tempo;
+  let t = audioCtx.currentTime + 0.06;
+  const t0 = t;
+  doc.notes.forEach((n, i) => {
+    const d = n.dur * spb;
+    if (n.pitch != null) {
+      const o = audioCtx.createOscillator(),
+            g = audioCtx.createGain();
+      o.type = doc.wave; o.frequency.value = midiHz(n.pitch);
+      const v = 0.22 * (n.vel == null ? 0.7 : n.vel);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(Math.max(v, 0.0001), t + 0.015);
+      g.gain.setValueAtTime(Math.max(v, 0.0001),
+                            Math.max(t + 0.016, t + d - 0.06));
+      g.gain.linearRampToValueAtTime(0.0001, t + d);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t); o.stop(t + d + 0.03);
+    }
+    const bar = bars[i], onMs = (t - audioCtx.currentTime) * 1000,
+          offMs = onMs + d * 1000;
+    if (bar) { setTimeout(() => bar.classList.add("on"), onMs);
+               setTimeout(() => bar.classList.remove("on"), offMs); }
+    t += d;
+  });
+  setTimeout(() => { btn.disabled = false; btn.textContent = "\u25B6"; },
+             (t - t0) * 1000 + 120);
 }
 
 /* ── drives: breathing rings ── */

@@ -49,6 +49,7 @@ _VOID_TAGS = frozenset({"br", "hr"})
 # for some of them to actually work in the browser.
 _ATTR_CANONICAL = {
     "viewbox": "viewBox",
+    "preserveaspectratio": "preserveAspectRatio",
 }
 
 ALLOWED_ATTRS = frozenset({
@@ -56,6 +57,12 @@ ALLOWED_ATTRS = frozenset({
     "stroke-width", "cx", "cy", "r", "x", "y", "x1", "y1", "x2", "y2",
     "d", "points", "font-size", "text-anchor", "transform", "opacity",
     "rx", "ry",
+    # SVG presentation attrs for richer path drawing (v3b) — pure
+    # styling, no reference/URI semantics, screened by _BAD_VALUE
+    # like everything else.
+    "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
+    "stroke-dashoffset", "fill-opacity", "stroke-opacity",
+    "fill-rule", "stroke-miterlimit", "preserveaspectratio",
 })
 
 # Tags whose CONTENT is dangerous, not just the tag itself. Everything
@@ -65,6 +72,12 @@ _DROP_CONTENT_TAGS = frozenset({
     "meta", "base", "form", "input", "button", "textarea", "select",
     "video", "audio", "source", "template", "noscript", "frame",
     "frameset", "applet", "math", "title", "head",
+    # SVG escape hatches: foreignObject re-enters HTML land, use/image
+    # reference external content, animate/set can rewrite attributes
+    # (including href on browsers that still honor xlink). All dropped
+    # WITH contents — deny by default.
+    "foreignobject", "use", "animate", "set", "animatetransform",
+    "animatemotion", "mpath",
 })
 
 # Value screening: anything matching these kills the attribute.
@@ -171,6 +184,21 @@ class _Sanitizer(HTMLParser):
         while self.open_stack:
             self.out.append(f"</{self.open_stack.pop()}>")
         return "".join(self.out)
+
+
+def resanitize_expression(row: dict) -> dict:
+    """Serve-time defense in depth for one expression row, kind-aware:
+    tone bodies re-validate through the tone schema (anything invalid
+    serves as empty), markup bodies pass back through the sanitizer.
+    Mutates and returns the row."""
+    from .tone import parse_tone_body, tone_to_body
+
+    if row.get("kind") == "tone":
+        doc = parse_tone_body(row.get("body") or "")
+        row["body"] = tone_to_body(doc) if doc else ""
+    else:
+        row["body"] = sanitize_fragment(row.get("body") or "")
+    return row
 
 
 MAX_FRAGMENT_CHARS = 32_768

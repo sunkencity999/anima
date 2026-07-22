@@ -543,7 +543,7 @@ class MemoryStore:
         wake_id: Optional[str] = None,
         ts: Optional[float] = None,
     ) -> int:
-        if kind not in ("html", "svg"):
+        if kind not in ("html", "svg", "tone"):
             raise ValueError(f"unknown expression kind {kind!r}")
         if not body:
             raise ValueError("expression body must be non-empty")

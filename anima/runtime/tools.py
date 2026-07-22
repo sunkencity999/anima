@@ -301,31 +301,44 @@ def _tool_satisfy_drive(ctx: TurnContext, args: dict) -> dict:
 
 
 def _tool_express(ctx: TurnContext, args: dict) -> dict:
-    """The entity's face (Phase 6b): store a small HTML or SVG fragment
-    for the Observatory's expression feed. The fragment is sanitized
-    down to a strict whitelist BEFORE storage — the model never gets a
-    script tag into the database, let alone a browser."""
+    """The entity's face (Phase 6b, media widened in v3b): store a
+    small HTML fragment, an SVG drawing, or a tone sequence for the
+    Observatory's expression feed — the entity CHOOSES its medium.
+    Markup is sanitized down to a strict whitelist BEFORE storage (the
+    model never gets a script tag into the database, let alone a
+    browser); tones are validated down to a strict numeric schema —
+    sound as data, no binary blobs ever."""
     from .sanitize import sanitize_fragment
+    from .tone import tone_to_body, validate_tone
 
     html_body = args.get("html")
     svg_body = args.get("svg")
-    if bool(html_body) == bool(svg_body):
-        raise ValueError("express requires exactly one of html or svg")
-    kind = "svg" if svg_body else "html"
-    raw = str(svg_body or html_body)
-    clean = sanitize_fragment(raw)
-    if kind == "svg" and "<svg" not in clean:
-        raise ValueError("svg expression must contain an <svg> element "
-                         "that survives sanitization")
-    if not clean.strip():
-        raise ValueError("expression was empty after sanitization")
+    tone_body = args.get("tone")
+    given = [k for k, v in (("html", html_body), ("svg", svg_body),
+                            ("tone", tone_body)) if v]
+    if len(given) != 1:
+        raise ValueError("express requires exactly one of html, svg "
+                         "or tone")
+    kind = given[0]
     title = str(args.get("title") or "")[:160]
+
+    if kind == "tone":
+        clean = tone_to_body(validate_tone(tone_body))
+        sanitized = False
+    else:
+        raw = str(svg_body or html_body)
+        clean = sanitize_fragment(raw)
+        if kind == "svg" and "<svg" not in clean:
+            raise ValueError("svg expression must contain an <svg> "
+                             "element that survives sanitization")
+        if not clean.strip():
+            raise ValueError("expression was empty after sanitization")
+        sanitized = len(clean) != len(raw)
     expr_id = ctx.entity.store.add_expression(
         clean, kind=kind, title=title,
         wake_id=getattr(ctx.wake, "wake_id", None), ts=ctx.now)
     return {"expression_id": expr_id, "kind": kind,
-            "chars": len(clean),
-            "sanitized": len(clean) != len(raw)}
+            "chars": len(clean), "sanitized": sanitized}
 
 
 def _tool_reply(ctx: TurnContext, args: dict) -> dict:
@@ -403,10 +416,12 @@ def default_registry(
 
     reg.register(Tool(
         name="express", risk="low",
-        description="Show something on your Observatory: a small HTML "
-                    "or SVG fragment (a sketch, a diagram, a mood). It "
-                    "is sanitized to a strict whitelist of tags before "
-                    "anyone sees it.",
+        description="Show something on your Observatory — choose your "
+                    "medium: a small HTML fragment, an SVG drawing "
+                    "(paths welcome), or a short tone sequence. Markup "
+                    "is sanitized to a strict whitelist; tones are "
+                    "validated as structured data before anyone sees "
+                    "or hears them.",
         parameters={"type": "object", "properties": {
             "title": {"type": "string"},
             "html": {"type": "string",
@@ -414,7 +429,16 @@ def default_registry(
                                     "headings/lists + inline style)"},
             "svg": {"type": "string",
                     "description": "an SVG drawing (svg root element "
-                                   "required)"},
+                                   "required; path/circle/rect/line/"
+                                   "polygon/text + presentation "
+                                   "attributes)"},
+            "tone": {"type": "object",
+                     "description": "a short tone sequence: {tempo: "
+                                    "40-240 bpm, wave: sine|triangle|"
+                                    "square|sawtooth, notes: [{pitch: "
+                                    "'C4'|MIDI 21-108|'rest', dur: "
+                                    "beats, vel: 0-1}, ...]} — max 64 "
+                                    "notes, 30 seconds"},
         }},
         fn=_tool_express))
 
