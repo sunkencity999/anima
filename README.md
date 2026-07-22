@@ -121,6 +121,80 @@ work from a phone:
   for GPU sanity, and `prefers-reduced-motion` respected throughout.
   Checking on your entity from bed is a first-class use case.
 
+### Observatory v3b (the shared sky + expression media)
+
+v3b widens the dome twice: many entities under one sky, and richer
+media for what a single entity can express.
+
+**The shared sky** — a multi-entity observatory:
+
+```bash
+anima sky --config ~/skies/home.json --init   # scaffold the config
+# edit peers, then:
+anima sky --config ~/skies/home.json          # default port 8763
+```
+
+```json
+{
+  "port": 8763, "bind": "0.0.0.0", "token": "<sky token>",
+  "poll_s": 10, "timeout_s": 4, "title": "the shared sky",
+  "peers": [
+    {"name": "luna", "url": "http://host-a:8762", "token": "<luna's web token>"},
+    {"name": "nova", "url": "http://host-b:8762", "token": "<nova's web token>"}
+  ]
+}
+```
+
+A small stdlib aggregator (`anima/runtime/sky.py`) polls each peer's
+*existing* read-only Observatory API and serves one page: a shared
+constellation canvas where **each entity is a star cluster** — its
+lineage events laid out with the same deterministic hash as the
+single-entity constellation — whose halo pulses at its drive heat
+(calm 5s breath at zero pressure → urgent 1.4s as a wake approaches).
+**Migration edges draw warm dashed threads between clusters**: `anima
+sync` records the migration in both forks' lineage logs, and the
+aggregator matches those records against peer names (deduped, either
+fork's copy counts) — the lineage machinery is what makes several
+biographies one sky. Click a cluster for its summary card: name, age,
+memory/wake/ledger counts, live drive bars, its latest expression,
+and a link to that entity's own Observatory. Unreachable peers dim to
+a still grey cluster with an *unreachable* note — never a broken page.
+
+Security model: the sky page has its **own token** (same
+cookie/bearer/query scheme as the web sense); **peer tokens live only
+in the sky config and are used server-side** — they are never included
+in `/api/sky` responses or the page. Peer URLs *are* shipped (for the
+card link), but a sky viewer still needs each peer's token to get past
+its lock page: observing the sky grants no new authority. Peer-served
+expression bodies are re-sanitized by the aggregator before serving,
+so a compromised peer cannot inject into the sky page.
+
+**Expression media** — the entity chooses its medium. The `express`
+tool now takes exactly one of `html`, `svg`, or `tone`:
+
+- **SVG drawings** — path-based art welcome (`path`/`polygon`/
+  `polyline`/shapes/`text` plus presentation attributes:
+  `stroke-linecap/linejoin/dasharray/dashoffset`,
+  `fill-opacity`/`stroke-opacity`, `fill-rule`,
+  `preserveAspectRatio`). The sanitizer's SVG wall got harder in the
+  same pass: `foreignObject` (HTML re-entry), `use`/`image` (external
+  references) and the `animate`/`set`/`animateTransform`/
+  `animateMotion`/`mpath` family (attribute rewriting) are dropped
+  *with their contents*; `url(...)` values, event handlers and URI
+  schemes stay rejected as before.
+- **Tones** — sound as data, no binary blobs: the entity composes
+  `{tempo: 40–240 bpm, wave: sine|triangle|square|sawtooth, notes:
+  [{pitch: "C4"|MIDI 21–108|"rest", dur: beats, vel: 0–1}, …]}` (max
+  64 notes / 30 seconds). Validated down to a strict numeric schema
+  (`anima/runtime/tone.py`) before storage **and again at serve time**
+  (kind-aware `resanitize_expression`: tone rows re-validate through
+  the schema, markup rows re-sanitize — a tampered tone serves as
+  empty, never as markup). The Observatory renders a tone card as a
+  piano-roll built DOM-side from the validated numbers, with a play
+  button that synthesizes the phrase via WebAudio — each bar lights
+  amber as its note sounds. Existing grid/HTML expressions are
+  untouched; all three media arrive in the feed with the same bloom.
+
 - **Auth**: hit any URL with `?token=<token>` once → HttpOnly cookie;
   every `/api/*` route requires cookie, bearer header, or query token.
 - **Config**: `senses/web.json` — `{"port": 8762, "bind": "0.0.0.0",
