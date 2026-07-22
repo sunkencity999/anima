@@ -93,9 +93,93 @@ class TestAuth:
         assert status == 401
         assert b"DOME IS CLOSED" in body
 
-    def test_empty_token_config_refused(self):
+    def test_token_mode_with_empty_token_refused(self):
         with pytest.raises(ValueError, match="token"):
-            WebSense({"port": 0, "token": ""})
+            WebSense({"port": 0, "auth": "token", "token": ""})
+
+    def test_bad_auth_value_refused(self):
+        with pytest.raises(ValueError, match="auth"):
+            WebSense({"port": 0, "auth": "banana"})
+
+    def test_legacy_token_config_infers_token_mode(self, shell_and_sense):
+        # the fixture config has a token and no "auth" key: token mode
+        _, sense = shell_and_sense
+        assert sense.auth == "token"
+
+
+class TestOpenAuth:
+    """Home-mode (owner decision 2026-07-22): auth="open" — anyone on
+    the LAN connects and speaks as the operator; no cookie, no lock
+    page, no token anywhere."""
+
+    @pytest.fixture()
+    def open_shell_and_sense(self, tmp_path):
+        shell = RuntimeShell(str(tmp_path / "luna"), clock=lambda: T0)
+        sense = WebSense({"port": 0, "auth": "open",
+                          "bind": "127.0.0.1",
+                          "operator_person": "christopher"})
+        shell.add_sense("web", sense)
+        shell.start()
+        yield shell, sense
+        shell.shutdown()
+
+    def test_config_without_auth_or_token_is_open(self):
+        sense = WebSense({"port": 0, "bind": "127.0.0.1"})
+        assert sense.auth == "open"
+
+    def test_page_serves_without_any_auth(self, open_shell_and_sense):
+        _, sense = open_shell_and_sense
+        status, body, headers = call(sense, "GET", "/", token=None,
+                                     raw=True)
+        assert status == 200
+        assert b"Observatory" in body
+        assert b"DOME IS CLOSED" not in body
+        assert "Set-Cookie" not in headers  # no cookie in open mode
+
+    def test_api_serves_without_any_auth(self, open_shell_and_sense):
+        _, sense = open_shell_and_sense
+        status, doc, _ = call(sense, "GET", "/api/stats", token=None)
+        assert status == 200 and "memory" in doc
+
+    def test_message_attributed_to_operator(self, open_shell_and_sense):
+        shell, sense = open_shell_and_sense
+        status, doc, _ = call(sense, "POST", "/api/message",
+                              {"text": "hello"}, token=None)
+        assert status == 202
+        results = shell.run_pending_once()
+        wake = results[0]["wake"]
+        assert wake.payload["sender"] == "christopher"
+        ctx = wake.payload["access_context"]
+        assert ctx["kind"] == "direct"
+        assert ctx["participants"] == ["christopher"]
+
+    def test_memory_search_walled_as_operator(self,
+                                              open_shell_and_sense):
+        shell, sense = open_shell_and_sense
+        store = shell.entity.store
+        store.add_episode("antonia's secret garden plan", ts=T0,
+                          scope="private", owner="antonia",
+                          tags=["garden"])
+        store.add_episode("shared note about the garden hose", ts=T0,
+                          scope="shared", tags=["garden"])
+        _, doc, _ = call(sense, "GET", "/api/memory/search?q=garden",
+                         token=None)
+        summaries = " | ".join(e["summary"] for e in doc["episodes"])
+        assert "shared note" in summaries
+        # open ≠ omniscient: the operator wall still applies
+        assert "antonia's secret" not in summaries
+        assert doc["as_person"] == "christopher"
+
+    def test_garbage_bearer_still_accepted_open(self,
+                                                open_shell_and_sense):
+        _, sense = open_shell_and_sense
+        status, _, _ = call(sense, "GET", "/api/ledger",
+                            token="whatever")
+        assert status == 200
+
+    def test_explicit_open_wins_over_present_token(self):
+        sense = WebSense({"port": 0, "auth": "open", "token": "x"})
+        assert sense.auth == "open"
 
 
 class TestPage:

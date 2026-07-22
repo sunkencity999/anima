@@ -127,18 +127,23 @@ TELEGRAM_TEMPLATE = {
 }
 
 
-def _web_template() -> dict:
-    import secrets
-    return {
+def _web_template(auth: str = "open") -> dict:
+    # Home-mode default (owner decision 2026-07-22): LAN-exposed AND
+    # open — if a person can reach the home network, they can connect
+    # and say hello to the agent. An Observatory nobody can reach is a
+    # window with the curtains nailed shut. `anima init --auth token`
+    # (or "auth": "token" + a token in web.json) restores the gate;
+    # "bind": "127.0.0.1" goes loopback-only.
+    cfg = {
         "port": 8762,
-        # LAN-exposed by default (owner decision 2026-07-22): the random
-        # token is the gate, and an Observatory nobody can reach is a
-        # window with the curtains nailed shut. Set "127.0.0.1" to go
-        # loopback-only.
         "bind": "0.0.0.0",
-        "token": secrets.token_urlsafe(24),
+        "auth": auth,
         "operator_person": "operator",
     }
+    if auth == "token":
+        import secrets
+        cfg["token"] = secrets.token_urlsafe(24)
+    return cfg
 
 IDENTITY_FILES = ("soul.md", "drives.json", "routing.json")
 
@@ -179,7 +184,8 @@ def cmd_init(args) -> int:
     web_path = os.path.join(root, "senses", "web.json")
     if not os.path.exists(web_path):
         with open(web_path, "w", encoding="utf-8") as f:
-            json.dump(_web_template(), f, indent=2)
+            json.dump(_web_template(getattr(args, "auth", "open")),
+                      f, indent=2)
             f.write("\n")
 
     # Let EntityRoot assemble the organs once: creates the sqlite stores
@@ -388,18 +394,20 @@ def cmd_sync(args) -> int:
 # ── sky (the shared sky: multi-entity observatory) ──────────────────
 
 def _sky_template() -> dict:
-    import secrets
+    # Home-mode default: the sky page is open, and peers may omit
+    # tokens entirely (open-mode Observatories need none). Add
+    # "auth": "token" + a "token" here to gate the sky page; add a
+    # "token" to a peer entry when THAT peer runs in token mode.
     return {
         "port": 8763,
         "bind": "0.0.0.0",
-        "token": secrets.token_urlsafe(24),
+        "auth": "open",
         "poll_s": 10,
         "timeout_s": 4,
         "title": "the shared sky",
         "peers": [
             {"name": "example",
-             "url": "http://127.0.0.1:8762",
-             "token": "<that entity's web token>"},
+             "url": "http://127.0.0.1:8762"},
         ],
     }
 
@@ -441,8 +449,13 @@ def cmd_sky(args) -> int:
     from .runtime.__main__ import _lan_ip
     host = sky.bind if sky.bind not in ("0.0.0.0", "") else _lan_ip()
     up = sum(1 for p in sky._snapshot["peers"] if p["reachable"])
-    print(f"shared sky: http://{host}:{sky.port}/?token=… "
-          f"(token in {cfg_path})", file=sys.stderr)
+    if sky.auth == "open":
+        print(f"shared sky: http://{host}:{sky.port}/  (open to the "
+              f"LAN — anyone who can reach it sees it)",
+              file=sys.stderr)
+    else:
+        print(f"shared sky: http://{host}:{sky.port}/?token=… "
+              f"(token in {cfg_path})", file=sys.stderr)
     print(f"peers: {up}/{len(sky.peers)} reachable", file=sys.stderr)
     try:
         while True:
@@ -464,6 +477,10 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("init", help="scaffold a new entity root")
     p.add_argument("root", help="directory to become the entity root")
+    p.add_argument("--auth", choices=("open", "token"), default="open",
+                   help="Observatory auth mode for the scaffolded "
+                        "web.json (default: open — anyone on the LAN; "
+                        "token generates a random access token)")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("run", help="host the entity (runtime shell)")

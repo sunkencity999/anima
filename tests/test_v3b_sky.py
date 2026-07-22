@@ -73,10 +73,16 @@ def call(port, path, *, token=SKY_TOKEN, raw=False):
 
 
 class TestSkyConfig:
-    def test_requires_token(self, two_peers):
+    def test_token_mode_requires_token(self, two_peers):
         cfg = sky_config(two_peers)
+        cfg["auth"] = "token"
         cfg["token"] = ""
         with pytest.raises(ValueError, match="token"):
+            SkyAggregator(cfg)
+
+    def test_bad_auth_value_refused(self, two_peers):
+        cfg = sky_config(two_peers, auth="banana")
+        with pytest.raises(ValueError, match="auth"):
             SkyAggregator(cfg)
 
     def test_requires_peers(self):
@@ -109,6 +115,71 @@ class TestSkyAuth:
     def test_unknown_endpoint_404(self, sky):
         status, doc = call(sky.port, "/api/nope")
         assert status == 404
+
+
+class TestSkyOpenAuth:
+    """Home-mode: auth="open" serves the sky to anyone on the wire;
+    legacy configs (token, no auth key) keep token behavior."""
+
+    @pytest.fixture()
+    def open_sky(self, two_peers):
+        cfg = sky_config(two_peers, auth="open")
+        del cfg["token"]
+        agg = SkyAggregator(cfg)
+        agg.refresh()
+        agg.start()
+        yield agg
+        agg.stop()
+
+    def test_page_serves_without_any_auth(self, open_sky):
+        status, body = call(open_sky.port, "/", token=None, raw=True)
+        assert status == 200 and b"shared sky" in body
+
+    def test_api_serves_without_any_auth(self, open_sky):
+        status, doc = call(open_sky.port, "/api/sky", token=None)
+        assert status == 200
+        assert sorted(p["name"] for p in doc["peers"]) == ["luna",
+                                                           "nova"]
+
+    def test_open_mode_sets_no_cookie(self, open_sky):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{open_sky.port}/")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            assert resp.headers.get("Set-Cookie") is None
+
+    def test_legacy_config_with_token_stays_gated(self, sky):
+        # the `sky` fixture has a token and no "auth" key — inference
+        # must keep it token-gated
+        assert sky.auth == "token"
+        status, _ = call(sky.port, "/api/sky", token=None)
+        assert status == 401
+
+    def test_explicit_open_wins_over_present_token(self, two_peers):
+        agg = SkyAggregator(sky_config(two_peers, auth="open"))
+        assert agg.auth == "open"
+
+    def test_open_peer_polled_without_authorization(self, tmp_path):
+        """A token-less peer entry polls an open-mode Observatory
+        successfully (no Authorization header sent)."""
+        from anima.runtime import RuntimeShell
+        shell = RuntimeShell(str(tmp_path / "soleil"),
+                             clock=lambda: T0)
+        sense = WebSense({"port": 0, "auth": "open",
+                          "bind": "127.0.0.1",
+                          "operator_person": "christopher"})
+        shell.add_sense("web", sense)
+        shell.start()
+        try:
+            agg = SkyAggregator({
+                "port": 0, "bind": "127.0.0.1", "auth": "open",
+                "timeout_s": 2,
+                "peers": [{"url":
+                           f"http://127.0.0.1:{sense.port}"}]})
+            snap = agg.refresh()
+            assert snap["peers"][0]["reachable"] is True
+            assert snap["peers"][0]["name"] == "soleil"
+        finally:
+            shell.shutdown()
 
 
 class TestSkyAggregation:

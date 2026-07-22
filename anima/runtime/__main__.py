@@ -89,8 +89,12 @@ def main(argv=None) -> int:
         web = WebSense(web_cfg)
         shell.add_sense("web", web)
         host = web.bind if web.bind not in ("0.0.0.0", "") else _lan_ip()
-        print(f"observatory: http://{host}:{web.port}/?token=… "
-              f"(token in the web sense config)", file=sys.stderr)
+        if web.auth == "open":
+            print(f"observatory: http://{host}:{web.port}/  (open — "
+                  f"anyone on the LAN can say hello)", file=sys.stderr)
+        else:
+            print(f"observatory: http://{host}:{web.port}/?token=… "
+                  f"(token in the web sense config)", file=sys.stderr)
 
     if use_console:
         console = ConsoleSense(sender=args.sender)

@@ -49,6 +49,22 @@ def test_init_refuses_overwrite(tmp_path, capsys):
     assert "refusing" in capsys.readouterr().err.lower()
 
 
+def test_init_scaffolds_open_web_config_by_default(tmp_path):
+    root = _init(tmp_path)
+    web = json.loads((root / "senses" / "web.json").read_text())
+    assert web["auth"] == "open"
+    assert "token" not in web
+    assert web["bind"] == "0.0.0.0"
+
+
+def test_init_auth_token_scaffolds_gated_web_config(tmp_path):
+    root = tmp_path / "gated"
+    assert main(["init", str(root), "--auth", "token"]) == 0
+    web = json.loads((root / "senses" / "web.json").read_text())
+    assert web["auth"] == "token"
+    assert len(web["token"]) >= 24
+
+
 # ── status ────────────────────────────────────────────────────────────
 
 def test_status_reports_memory_drives_lineage_lock(tmp_path, capsys):

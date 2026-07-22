@@ -7,14 +7,23 @@ Pure stdlib ThreadingHTTPServer, loopback by default, deliberately.
 Config (senses/web.json inside the entity root, or a dict):
 
     {"port": 8762,                       # 0 = ephemeral (tests)
-     "token": "<access token>",          # REQUIRED
+     "auth": "open",                     # "open" (default) | "token"
+     "token": "<access token>",          # required when auth="token"
      "bind": "127.0.0.1",
      "operator_person": "christopher"}   # who the chat panel speaks as
 
-Auth model: browser-shaped. Hit any URL with ?token=<token> once → a
-session cookie is set; from then on the cookie authenticates. All
-/api/* endpoints and the page itself require it (401 + lock page
-otherwise). Bearer <token> also works, for tests and curl.
+Auth model (home-mode, owner decision 2026-07-22): **open by default**.
+A home agent should greet anyone who can reach it on the LAN — open
+mode authorizes every request as the operator person, sets no cookie,
+and never shows the lock page. `"auth": "token"` restores the
+browser-shaped gate: hit any URL with ?token=<token> once → a session
+cookie is set; from then on the cookie authenticates. All /api/*
+endpoints and the page itself require it (401 + lock page otherwise).
+Bearer <token> also works, for tests and curl.
+
+Back-compat: configs written before the `auth` key infer their mode —
+a token present with no explicit `auth` means token mode; neither
+present means open.
 
 Endpoints:
     GET  /                    → the Observatory page
@@ -83,8 +92,8 @@ class WebSense:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
         self.token = str(config.get("token") or "")
-        if not self.token:
-            raise ValueError("web sense config requires a non-empty token")
+        self.auth = _resolve_auth(config.get("auth"), self.token,
+                                  what="web sense config")
         self.port = int(config.get("port", DEFAULT_PORT))
         # Default matches the init template: LAN-exposed, token-gated.
         self.bind = str(config.get("bind", "0.0.0.0"))
@@ -130,9 +139,13 @@ class WebSense:
                 return parsed.path, query
 
             def _auth(self, query) -> tuple[bool, bool]:
-                """→ (authed, via_query_token). Cookie, bearer header,
-                or ?token= all work; ?token= additionally earns the
-                cookie so browsers only need it once."""
+                """→ (authed, via_query_token). Open mode: everyone on
+                the wire IS the operator — that's the point of a home
+                agent. Token mode: cookie, bearer header, or ?token=
+                all work; ?token= additionally earns the cookie so
+                browsers only need it once."""
+                if sense.auth == "open":
+                    return True, False
                 qtok = (query.get("token") or [None])[0]
                 if qtok is not None:
                     return (qtok == sense.token, qtok == sense.token)
@@ -469,6 +482,27 @@ class WebSense:
                 "wake_id": getattr(wake, "wake_id", None),
                 "ts": time.time(),
             })
+
+
+def _resolve_auth(auth_field, token: str, *, what: str) -> str:
+    """Resolve the auth mode with back-compat inference.
+
+    Explicit "open"/"token" wins; a legacy config with a token and no
+    `auth` key keeps token behavior; neither → open (home-mode
+    default). Token mode without a token is a config error.
+    """
+    if auth_field is None:
+        mode = "token" if token else "open"
+    else:
+        mode = str(auth_field).strip().lower()
+        if mode not in ("open", "token"):
+            raise ValueError(
+                f'{what}: "auth" must be "open" or "token", '
+                f'got {auth_field!r}')
+    if mode == "token" and not token:
+        raise ValueError(
+            f'{what}: auth="token" requires a non-empty token')
+    return mode
 
 
 def _int_arg(query, name: str, default: int, lo: int, hi: int) -> int:

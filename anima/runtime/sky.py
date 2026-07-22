@@ -13,7 +13,8 @@ Config (senses/sky.json, or a dict):
 
     {"port": 8763,
      "bind": "0.0.0.0",
-     "token": "<sky access token>",       # REQUIRED — the page's gate
+     "auth": "open",                      # "open" (default) | "token"
+     "token": "<sky access token>",       # required when auth="token"
      "poll_s": 10,                        # peer refresh cadence
      "timeout_s": 4,                      # per-peer request timeout
      "title": "the shared sky",
@@ -21,12 +22,19 @@ Config (senses/sky.json, or a dict):
        {"name": "luna",                   # optional; defaults to the
                                           #   peer's reported name
         "url": "http://host:8762",        # peer Observatory base URL
-        "token": "<that peer's token>"}   # SERVER-SIDE ONLY
+        "token": "<that peer's token>"}   # SERVER-SIDE ONLY; omit for
+                                          #   open-mode peers
      ]}
 
 Security model:
-- The sky page has its OWN token (cookie/bearer/query, same
-  browser-shaped scheme as the web sense).
+- Home-mode default (owner decision 2026-07-22): the sky page is OPEN
+  — anyone on the LAN sees the constellation. `"auth": "token"` gives
+  the page its own token gate (cookie/bearer/query, same
+  browser-shaped scheme as the web sense). Back-compat: a legacy
+  config with a token and no `auth` key keeps token behavior.
+- Peer tokens are optional: the aggregator only sends an
+  Authorization header when a peer token is configured (open-mode
+  peers need none).
 - Peer tokens live in this config and are used server-side to poll the
   peers; they are NEVER included in /api/sky responses or the page.
   The peer `url` IS shipped (the cluster card links to that entity's
@@ -55,6 +63,7 @@ from typing import Any, Optional
 
 from .observatory import LOCK_PAGE, render_sky_page
 from .sanitize import resanitize_expression
+from .senses.web_sense import _resolve_auth
 
 DEFAULT_SKY_PORT = 8763
 _COOKIE = "anima_sky"
@@ -86,8 +95,8 @@ class SkyAggregator:
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
         self.token = str(config.get("token") or "")
-        if not self.token:
-            raise ValueError("sky config requires a non-empty token")
+        self.auth = _resolve_auth(config.get("auth"), self.token,
+                                  what="sky config")
         self.port = int(config.get("port", DEFAULT_SKY_PORT))
         self.bind = str(config.get("bind", "0.0.0.0"))
         self.poll_s = float(config.get("poll_s", 10.0))
@@ -116,10 +125,11 @@ class SkyAggregator:
 
     # ── peer polling (server-side; peer tokens never leave here) ─────
     def _fetch(self, peer: dict, path: str) -> Any:
-        req = urllib.request.Request(
-            peer["url"] + path,
-            headers={"Authorization": f"Bearer {peer['token']}",
-                     "User-Agent": "anima-sky/0.1"})
+        headers = {"User-Agent": "anima-sky/0.1"}
+        if peer["token"]:  # open-mode peers need no Authorization
+            headers["Authorization"] = f"Bearer {peer['token']}"
+        req = urllib.request.Request(peer["url"] + path,
+                                     headers=headers)
         with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
             return json.loads(r.read().decode("utf-8"))
 
@@ -244,6 +254,8 @@ class SkyAggregator:
                 return parsed.path, urllib.parse.parse_qs(parsed.query)
 
             def _auth(self, query) -> tuple[bool, bool]:
+                if sky.auth == "open":
+                    return True, False
                 qtok = (query.get("token") or [None])[0]
                 if qtok is not None:
                     return (qtok == sky.token, qtok == sky.token)
