@@ -78,7 +78,8 @@ class WebSense:
         if not self.token:
             raise ValueError("web sense config requires a non-empty token")
         self.port = int(config.get("port", DEFAULT_PORT))
-        self.bind = str(config.get("bind", "127.0.0.1"))
+        # Default matches the init template: LAN-exposed, token-gated.
+        self.bind = str(config.get("bind", "0.0.0.0"))
         self.operator = str(config.get("operator_person") or "operator")
         # SSE tunables (overridable in config; tests shrink them)
         self.stream_poll_s = float(config.get("stream_poll_s", 2.0))

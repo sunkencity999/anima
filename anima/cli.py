@@ -131,7 +131,11 @@ def _web_template() -> dict:
     import secrets
     return {
         "port": 8762,
-        "bind": "127.0.0.1",
+        # LAN-exposed by default (owner decision 2026-07-22): the random
+        # token is the gate, and an Observatory nobody can reach is a
+        # window with the curtains nailed shut. Set "127.0.0.1" to go
+        # loopback-only.
+        "bind": "0.0.0.0",
         "token": secrets.token_urlsafe(24),
         "operator_person": "operator",
     }

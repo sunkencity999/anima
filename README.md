@@ -85,15 +85,22 @@ open*:
 
 - **Auth**: hit any URL with `?token=<token>` once → HttpOnly cookie;
   every `/api/*` route requires cookie, bearer header, or query token.
-  Loopback bind by default, deliberately.
-- **Config**: `senses/web.json` — `{"port": 8762, "bind": "127.0.0.1",
+- **Config**: `senses/web.json` — `{"port": 8762, "bind": "0.0.0.0",
   "token": "…", "operator_person": "…"}` (scaffolded by `anima init`
-  with a random token).
+  with a random token). LAN-exposed by default — the token is the
+  gate; set `"bind": "127.0.0.1"` (or pass `--bind 127.0.0.1`) for
+  loopback-only. `anima run` also accepts `--bind` / `--web-port`
+  overrides so nothing requires editing JSON.
 
 ## Phase 6a: install + CLI + Telegram
 
 ```bash
-pip install -e .            # console script: anima
+# Recommended: pipx (or `uv tool install .`) — modern Debian/Ubuntu
+# mark the system Python "externally managed" (PEP 668), so bare pip
+# refuses without a venv. pipx makes its own isolated venv per tool,
+# which costs us nothing: anima has ZERO dependencies to isolate.
+pipx install .              # console script: anima
+# dev checkout alternative:  pip install -e .  (inside a venv)
 
 anima init ~/entities/me    # scaffold an entity root (refuses to
                             # overwrite existing identity files)
@@ -105,6 +112,43 @@ anima sync ~/entities/me /mnt/newhome/me   # MIGRATION, not cloning:
                             # source BEFORE copying (both forks carry
                             # it), and warns that forks diverge.
 ```
+
+### Deployment: the Observatory as a real service
+
+`anima run --web` is a foreground process; to serve the Observatory
+permanently from a server, wrap it in a systemd **user** unit
+(survives logout with `loginctl enable-linger $USER`):
+
+```ini
+# ~/.config/systemd/user/anima-observatory.service
+[Unit]
+Description=ANIMA entity + Observatory web GUI
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/anima run --root %h/entities/me --web
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now anima-observatory.service
+journalctl --user -u anima-observatory -f   # ledger + URL in the log
+```
+
+Notes:
+- The startup line prints the reachable URL (LAN IP resolved when
+  bound to `0.0.0.0`); the token lives in `<root>/senses/web.json`.
+- One entity per root: the runtime pidfile-locks the root, so a second
+  service on the same root refuses to start (by design — it's a body,
+  not a load-balanced app).
+- For internet exposure put a TLS reverse proxy (nginx/caddy) in
+  front; the token cookie is HttpOnly but plain HTTP on an open
+  network is still plain HTTP.
 
 **Telegram sense** (`anima run --root R --telegram`): pure-stdlib Bot
 API long polling — no SDK. Configure `R/senses/telegram.json`:

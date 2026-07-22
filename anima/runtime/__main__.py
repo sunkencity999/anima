@@ -43,6 +43,11 @@ def main(argv=None) -> int:
     ap.add_argument("--web-config", default=None,
                     help="path to web sense config JSON "
                          "(default <root>/senses/web.json)")
+    ap.add_argument("--bind", default=None,
+                    help="override the web sense bind address "
+                         "(e.g. 0.0.0.0 for LAN, 127.0.0.1 for loopback)")
+    ap.add_argument("--web-port", type=int, default=None,
+                    help="override the web sense port")
     ap.add_argument("--sender", default="operator",
                     help="person id for console messages")
     args = ap.parse_args(argv)
@@ -71,12 +76,20 @@ def main(argv=None) -> int:
         shell.add_sense("telegram", TelegramSense(config_path=cfg))
 
     if args.web:
+        import json as _json
         from .senses.web_sense import WebSense
-        cfg = args.web_config or os.path.join(
+        cfg_path = args.web_config or os.path.join(
             os.path.abspath(args.root), "senses", "web.json")
-        web = WebSense(config_path=cfg)
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            web_cfg = _json.load(f)
+        if args.bind is not None:
+            web_cfg["bind"] = args.bind
+        if args.web_port is not None:
+            web_cfg["port"] = args.web_port
+        web = WebSense(web_cfg)
         shell.add_sense("web", web)
-        print(f"observatory: http://{web.bind}:{web.port}/?token=… "
+        host = web.bind if web.bind not in ("0.0.0.0", "") else _lan_ip()
+        print(f"observatory: http://{host}:{web.port}/?token=… "
               f"(token in the web sense config)", file=sys.stderr)
 
     if use_console:
@@ -97,6 +110,21 @@ def main(argv=None) -> int:
 
     shell.run()
     return 0
+
+
+def _lan_ip() -> str:
+    """Best-effort LAN address for the printed URL (display only —
+    the socket never sends a packet; UDP connect just picks a route)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return "127.0.0.1"
 
 
 def _tick_loop(shell: RuntimeShell) -> None:
