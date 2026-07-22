@@ -22,6 +22,46 @@ dependencies (pytest only for the test suite).
   `anima-harness` package with the `anima` entity-lifecycle CLI
   (init / run / status / sync-as-migration) and a pure-stdlib Telegram
   long-polling sense.
+- **Phase 6b — the Observatory** (ARCHITECTURE.md §6): the entity's
+  face. A single-page dark-sky web GUI (chat, expression feed, drive
+  gauges, lineage timeline, ledger stream, ACL-walled memory search)
+  plus an `express` tool that lets the entity *draw* — sanitized
+  HTML/SVG fragments rendered as cards.
+
+## Phase 6b: the Observatory
+
+```bash
+anima run --root ~/entities/me --web
+# observatory: http://127.0.0.1:8762/?token=…  (token in senses/web.json)
+```
+
+The Observatory is ARCHITECTURE.md §6 made visible: *oversight is a
+feature of the architecture, not a courtesy.* One page, deep-blue
+observatory-at-night theme, zero external assets (no CDN, no fonts —
+the whole GUI is Python string constants in `anima/runtime/observatory.py`).
+Header shows the entity's name, lock state and uptime; the left panel
+is a chat with the entity (wakes injected as `direct` AccessContexts
+for `operator_person`); the right panel is the **expression feed** —
+whatever the entity chose to show via the new low-risk `express` tool.
+Below: animated drive-pressure gauges, the lineage timeline (its
+biography), the live action ledger (its receipts), and a memory search
+box that goes through the same Phase 4 ACL wall as everything else —
+the operator's GUI cannot surface other people's private rows.
+
+- **`express` tool** (risk: low): the model emits `{title?, html}` or
+  `{title?, svg}`. The fragment is sanitized down to a strict tag/attr
+  whitelist (`anima/runtime/sanitize.py`, stdlib `html.parser`) —
+  script/iframe/object/embed/img dropped *with contents*, all `on*`
+  handlers gone, `javascript:`/`url(`/`expression(`/`@import` values
+  rejected — **before** storage, and re-sanitized at serve time
+  (defense in depth). Stored in an `expressions` table in
+  `memory.sqlite` with ts / wake_id / title / kind / body.
+- **Auth**: hit any URL with `?token=<token>` once → HttpOnly cookie;
+  every `/api/*` route requires cookie, bearer header, or query token.
+  Loopback bind by default, deliberately.
+- **Config**: `senses/web.json` — `{"port": 8762, "bind": "127.0.0.1",
+  "token": "…", "operator_person": "…"}` (scaffolded by `anima init`
+  with a random token).
 
 ## Phase 6a: install + CLI + Telegram
 

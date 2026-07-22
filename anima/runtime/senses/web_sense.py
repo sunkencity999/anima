@@ -1,0 +1,319 @@
+"""Web sense — the Observatory server (Phase 6b, ARCHITECTURE.md §6).
+
+Serves the entity's face: a single-page dark-sky GUI (chat, expression
+feed, drive gauges, lineage timeline, ledger stream, memory search).
+Pure stdlib ThreadingHTTPServer, loopback by default, deliberately.
+
+Config (senses/web.json inside the entity root, or a dict):
+
+    {"port": 8762,                       # 0 = ephemeral (tests)
+     "token": "<access token>",          # REQUIRED
+     "bind": "127.0.0.1",
+     "operator_person": "christopher"}   # who the chat panel speaks as
+
+Auth model: browser-shaped. Hit any URL with ?token=<token> once → a
+session cookie is set; from then on the cookie authenticates. All
+/api/* endpoints and the page itself require it (401 + lock page
+otherwise). Bearer <token> also works, for tests and curl.
+
+Endpoints:
+    GET  /                    → the Observatory page
+    POST /api/message {text}  → direct-context wake from operator_person
+    GET  /api/replies         → drain the outbound reply queue
+    GET  /api/lineage         → parsed lineage entries
+    GET  /api/drives          → live drive pressures
+    GET  /api/ledger?limit=50 → recent ledger rows
+    GET  /api/memory/search?q=… → episodic+semantic hits through a
+         DIRECT AccessContext for operator_person — the Phase 4 wall is
+         applied INSIDE sqlite; other people's private rows are
+         structurally invisible even to the operator's own GUI.
+    GET  /api/expressions?limit=20 → expression cards (re-sanitized at
+         serve time: defense in depth)
+    GET  /api/stats           → entity stats + lock/uptime
+
+Threading: handlers run on HTTP threads but every touch of the entity's
+organs happens under the shell's dispatch lock — the single-writer
+discipline (Phase 5) extends to readers of the same sqlite handles.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+import urllib.parse
+from http import cookies as http_cookies
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Optional
+
+from ...relationships import AccessContext
+from ...relationships.acl import compile_acl
+from ..observatory import LOCK_PAGE, render_page
+from ..sanitize import sanitize_fragment
+
+_MAX_BODY = 256 * 1024
+_COOKIE = "anima_observatory"
+
+DEFAULT_PORT = 8762
+
+
+class WebSense:
+    name = "web"
+
+    def __init__(self, config: Optional[dict] = None, *,
+                 config_path: Optional[str] = None):
+        if config is None:
+            if not config_path or not os.path.exists(config_path):
+                raise ValueError(
+                    "WebSense needs a config dict or an existing "
+                    "config_path (senses/web.json)")
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        self.token = str(config.get("token") or "")
+        if not self.token:
+            raise ValueError("web sense config requires a non-empty token")
+        self.port = int(config.get("port", DEFAULT_PORT))
+        self.bind = str(config.get("bind", "127.0.0.1"))
+        self.operator = str(config.get("operator_person") or "operator")
+        self.shell: Any = None
+        self.server: Optional[ThreadingHTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._replies: list = []
+        self._replies_lock = threading.Lock()
+        self._started_ts: Optional[float] = None
+
+    # ── shared helpers ────────────────────────────────────────────────
+    def _entity_name(self) -> str:
+        try:
+            return os.path.basename(self.shell.entity.root) or "anima"
+        except Exception:
+            return "anima"
+
+    def _locked(self, fn, *args, **kwargs):
+        """Run an entity-touching callable under the shell's dispatch
+        lock: HTTP threads never race the scheduler on sqlite."""
+        with self.shell._dispatch_lock:
+            return fn(*args, **kwargs)
+
+    # ── shell lifecycle hooks ─────────────────────────────────────────
+    def start(self, shell: Any) -> None:
+        self.shell = shell
+        self._started_ts = time.time()
+        sense = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # noqa: N802 — silence
+                pass
+
+            # ── plumbing ─────────────────────────────────────────────
+            def _split(self):
+                parsed = urllib.parse.urlsplit(self.path)
+                query = urllib.parse.parse_qs(parsed.query)
+                return parsed.path, query
+
+            def _auth(self, query) -> tuple[bool, bool]:
+                """→ (authed, via_query_token). Cookie, bearer header,
+                or ?token= all work; ?token= additionally earns the
+                cookie so browsers only need it once."""
+                qtok = (query.get("token") or [None])[0]
+                if qtok is not None:
+                    return (qtok == sense.token, qtok == sense.token)
+                header = self.headers.get("Authorization", "")
+                if header == f"Bearer {sense.token}":
+                    return True, False
+                jar = http_cookies.SimpleCookie(
+                    self.headers.get("Cookie", ""))
+                morsel = jar.get(_COOKIE)
+                return (bool(morsel) and morsel.value == sense.token,
+                        False)
+
+            def _send(self, code: int, body: bytes, ctype: str,
+                      set_cookie: bool = False) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                if set_cookie:
+                    self.send_header(
+                        "Set-Cookie",
+                        f"{_COOKIE}={sense.token}; HttpOnly; "
+                        f"SameSite=Strict; Path=/")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _json(self, code: int, doc: dict,
+                      set_cookie: bool = False) -> None:
+                self._send(code, json.dumps(doc).encode("utf-8"),
+                           "application/json", set_cookie)
+
+            def _read_json(self) -> Optional[dict]:
+                try:
+                    n = min(int(self.headers.get("Content-Length", 0)),
+                            _MAX_BODY)
+                    doc = json.loads(self.rfile.read(n).decode("utf-8"))
+                    return doc if isinstance(doc, dict) else None
+                except (ValueError, json.JSONDecodeError):
+                    return None
+
+            # ── GET ──────────────────────────────────────────────────
+            def do_GET(self):  # noqa: N802
+                path, query = self._split()
+                authed, fresh = self._auth(query)
+
+                if path == "/":
+                    if not authed:
+                        return self._send(401,
+                                          LOCK_PAGE.encode("utf-8"),
+                                          "text/html; charset=utf-8")
+                    page = render_page(sense._entity_name())
+                    return self._send(200, page.encode("utf-8"),
+                                      "text/html; charset=utf-8",
+                                      set_cookie=fresh)
+
+                if not path.startswith("/api/"):
+                    return self._json(404, {"error": "unknown endpoint"})
+                if not authed:
+                    return self._json(401, {"error": "unauthorized"})
+
+                try:
+                    return self._api_get(path, query, fresh)
+                except Exception as exc:  # a broken panel ≠ a dead dome
+                    return self._json(500, {"error": f"{type(exc).__name__}"
+                                                     f": {exc}"})
+
+            def _api_get(self, path, query, fresh):
+                entity = sense.shell.entity
+
+                if path == "/api/replies":
+                    with sense._replies_lock:
+                        out, sense._replies = sense._replies, []
+                    return self._json(200, {
+                        "replies": out,
+                        "entity": sense._entity_name()}, set_cookie=fresh)
+
+                if path == "/api/lineage":
+                    lines = sense._locked(entity.lineage)
+                    parsed = []
+                    for line in lines:
+                        bits = [b.strip() for b in line.split("|", 2)]
+                        while len(bits) < 3:
+                            bits.append("")
+                        parsed.append({"ts": bits[0], "kind": bits[1],
+                                       "detail": bits[2]})
+                    return self._json(200, {"lineage": parsed})
+
+                if path == "/api/drives":
+                    drives = []
+                    if entity.drives is not None:
+                        drives = sense._locked(
+                            entity.drives.pressure_summary,
+                            sense.shell.clock())
+                    return self._json(200, {"drives": drives})
+
+                if path == "/api/ledger":
+                    limit = _int_arg(query, "limit", 50, 1, 500)
+                    rows = sense._locked(entity.ledger.recent, limit)
+                    return self._json(200, {"actions": rows})
+
+                if path == "/api/memory/search":
+                    q = (query.get("q") or [""])[0].strip()
+                    if not q:
+                        return self._json(400, {"error": "q required"})
+                    ctx = AccessContext.direct(sense.operator,
+                                               channel="observatory")
+                    household = sense._locked(
+                        entity.relationships.household_members)
+                    acl = compile_acl(ctx, household)
+                    episodes = sense._locked(
+                        entity.store.search_episodes, q, 10, acl)
+                    beliefs = sense._locked(
+                        entity.store.search_beliefs, q, 10, False, acl)
+                    return self._json(200, {"episodes": episodes,
+                                            "beliefs": beliefs,
+                                            "as_person": sense.operator})
+
+                if path == "/api/expressions":
+                    limit = _int_arg(query, "limit", 20, 1, 100)
+                    rows = sense._locked(
+                        entity.store.recent_expressions, limit)
+                    for row in rows:  # defense in depth: re-sanitize
+                        row["body"] = sanitize_fragment(row["body"])
+                    return self._json(200, {"expressions": rows})
+
+                if path == "/api/stats":
+                    stats = sense._locked(entity.stats)
+                    stats["name"] = sense._entity_name()
+                    up = (time.time() - sense._started_ts
+                          if sense._started_ts else 0.0)
+                    stats["uptime_s"] = round(up, 1)
+                    stats["lock"] = (f"live · pid {os.getpid()} · up "
+                                     f"{_fmt_uptime(up)}")
+                    return self._json(200, stats)
+
+                return self._json(404, {"error": "unknown endpoint"})
+
+            # ── POST ─────────────────────────────────────────────────
+            def do_POST(self):  # noqa: N802
+                path, query = self._split()
+                authed, fresh = self._auth(query)
+                if not authed:
+                    return self._json(401, {"error": "unauthorized"})
+                if path != "/api/message":
+                    return self._json(404, {"error": "unknown endpoint"})
+                doc = self._read_json()
+                if doc is None:
+                    return self._json(400, {"error": "invalid JSON body"})
+                text = str(doc.get("text") or "").strip()
+                if not text:
+                    return self._json(400, {"error": "text required"})
+                ctx = AccessContext.direct(sense.operator,
+                                           channel="observatory")
+                wake = sense.shell.inject_message(
+                    sense.operator, text, context=ctx, via="web")
+                return self._json(202, {"queued": wake.wake_id},
+                                  set_cookie=fresh)
+
+        self.server = ThreadingHTTPServer((self.bind, self.port), Handler)
+        self.port = self.server.server_address[1]  # resolve port 0
+        self._thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True,
+            name="anima-web-sense")
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        self.shell = None
+
+    # ── outbound ──────────────────────────────────────────────────────
+    def deliver(self, text: str, wake: Any = None) -> None:
+        with self._replies_lock:
+            self._replies.append({
+                "text": text,
+                "wake_id": getattr(wake, "wake_id", None),
+                "ts": time.time(),
+            })
+
+
+def _int_arg(query, name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        val = int((query.get(name) or [default])[0])
+    except (TypeError, ValueError):
+        val = default
+    return max(lo, min(hi, val))
+
+
+def _fmt_uptime(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"

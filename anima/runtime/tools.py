@@ -300,6 +300,34 @@ def _tool_satisfy_drive(ctx: TurnContext, args: dict) -> dict:
     return {"drive": name, "pressure": pressure}
 
 
+def _tool_express(ctx: TurnContext, args: dict) -> dict:
+    """The entity's face (Phase 6b): store a small HTML or SVG fragment
+    for the Observatory's expression feed. The fragment is sanitized
+    down to a strict whitelist BEFORE storage — the model never gets a
+    script tag into the database, let alone a browser."""
+    from .sanitize import sanitize_fragment
+
+    html_body = args.get("html")
+    svg_body = args.get("svg")
+    if bool(html_body) == bool(svg_body):
+        raise ValueError("express requires exactly one of html or svg")
+    kind = "svg" if svg_body else "html"
+    raw = str(svg_body or html_body)
+    clean = sanitize_fragment(raw)
+    if kind == "svg" and "<svg" not in clean:
+        raise ValueError("svg expression must contain an <svg> element "
+                         "that survives sanitization")
+    if not clean.strip():
+        raise ValueError("expression was empty after sanitization")
+    title = str(args.get("title") or "")[:160]
+    expr_id = ctx.entity.store.add_expression(
+        clean, kind=kind, title=title,
+        wake_id=getattr(ctx.wake, "wake_id", None), ts=ctx.now)
+    return {"expression_id": expr_id, "kind": kind,
+            "chars": len(clean),
+            "sanitized": len(clean) != len(raw)}
+
+
 def _tool_reply(ctx: TurnContext, args: dict) -> dict:
     text = str(args.get("text", "")).strip()
     if not text:
@@ -372,6 +400,23 @@ def default_registry(
             "text": {"type": "string"},
         }, "required": ["text"]},
         fn=_tool_reply))
+
+    reg.register(Tool(
+        name="express", risk="low",
+        description="Show something on your Observatory: a small HTML "
+                    "or SVG fragment (a sketch, a diagram, a mood). It "
+                    "is sanitized to a strict whitelist of tags before "
+                    "anyone sees it.",
+        parameters={"type": "object", "properties": {
+            "title": {"type": "string"},
+            "html": {"type": "string",
+                     "description": "an HTML fragment (div/span/p/"
+                                    "headings/lists + inline style)"},
+            "svg": {"type": "string",
+                    "description": "an SVG drawing (svg root element "
+                                   "required)"},
+        }},
+        fn=_tool_express))
 
     reg.register(Tool(
         name="http_get", risk="medium",

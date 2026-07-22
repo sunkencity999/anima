@@ -60,7 +60,7 @@ class TestSchemaFiltering:
         reg = default_registry()
         offered = names(reg.schemas("low"))
         assert offered == {"recall", "remember", "set_timer",
-                           "satisfy_drive", "reply"}
+                           "satisfy_drive", "reply", "express"}
 
     def test_normal_cap_adds_medium_not_high(self):
         reg = default_registry(allow_shell=True)

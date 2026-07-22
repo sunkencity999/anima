@@ -126,6 +126,16 @@ TELEGRAM_TEMPLATE = {
     "operator_person": "operator",
 }
 
+
+def _web_template() -> dict:
+    import secrets
+    return {
+        "port": 8762,
+        "bind": "127.0.0.1",
+        "token": secrets.token_urlsafe(24),
+        "operator_person": "operator",
+    }
+
 IDENTITY_FILES = ("soul.md", "drives.json", "routing.json")
 
 
@@ -162,6 +172,11 @@ def cmd_init(args) -> int:
         with open(tg_path, "w", encoding="utf-8") as f:
             json.dump(TELEGRAM_TEMPLATE, f, indent=2)
             f.write("\n")
+    web_path = os.path.join(root, "senses", "web.json")
+    if not os.path.exists(web_path):
+        with open(web_path, "w", encoding="utf-8") as f:
+            json.dump(_web_template(), f, indent=2)
+            f.write("\n")
 
     # Let EntityRoot assemble the organs once: creates the sqlite stores
     # and writes the "init" lineage entry (the birth certificate line).
@@ -197,6 +212,10 @@ def cmd_run(args) -> int:
         argv.append("--telegram")
     if args.telegram_config:
         argv += ["--telegram-config", args.telegram_config]
+    if args.web:
+        argv.append("--web")
+    if args.web_config:
+        argv += ["--web-config", args.web_config]
     if args.sender:
         argv += ["--sender", args.sender]
     return runtime_main(argv)
@@ -384,6 +403,9 @@ def main(argv=None) -> int:
     p.add_argument("--http-config", default=None)
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--telegram-config", default=None)
+    p.add_argument("--web", action="store_true",
+                   help="serve the Observatory web GUI")
+    p.add_argument("--web-config", default=None)
     p.add_argument("--sender", default=None,
                    help="person id for console messages")
     p.set_defaults(func=cmd_run)

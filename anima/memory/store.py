@@ -108,6 +108,20 @@ CREATE TABLE IF NOT EXISTS procedural (
     owner_person_id     TEXT
 );
 
+-- ── expressions: the entity's face (Phase 6b Observatory) ────────────
+-- Sanitized HTML/SVG fragments the entity chose to show. Body is
+-- stored POST-sanitization (the wall is at write time AND at serve
+-- time — defense in depth).
+CREATE TABLE IF NOT EXISTS expressions (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      REAL NOT NULL,
+    wake_id TEXT,
+    title   TEXT NOT NULL DEFAULT '',
+    kind    TEXT NOT NULL DEFAULT 'html',  -- html | svg
+    body    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_expressions_ts ON expressions(ts);
+
 -- ── consolidation queue: settle-phase → background organ handoff ─────
 CREATE TABLE IF NOT EXISTS consolidation_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -519,6 +533,35 @@ class MemoryStore:
             "scope": row["scope"],
             "owner_person_id": row["owner_person_id"],
         }
+
+    # ── expressions (Phase 6b) ────────────────────────────────────────
+    def add_expression(
+        self,
+        body: str,
+        kind: str = "html",
+        title: str = "",
+        wake_id: Optional[str] = None,
+        ts: Optional[float] = None,
+    ) -> int:
+        if kind not in ("html", "svg"):
+            raise ValueError(f"unknown expression kind {kind!r}")
+        if not body:
+            raise ValueError("expression body must be non-empty")
+        cur = self.db.execute(
+            "INSERT INTO expressions (ts, wake_id, title, kind, body)"
+            " VALUES (?,?,?,?,?)",
+            (ts if ts is not None else time.time(),
+             wake_id, title or "", kind, body),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def recent_expressions(self, limit: int = 20) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT * FROM expressions ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── consolidation queue ───────────────────────────────────────────
     def queue_candidate(

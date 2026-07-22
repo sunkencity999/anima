@@ -38,6 +38,11 @@ def main(argv=None) -> int:
     ap.add_argument("--telegram-config", default=None,
                     help="path to telegram sense config JSON "
                          "(default <root>/senses/telegram.json)")
+    ap.add_argument("--web", action="store_true",
+                    help="attach the Observatory web GUI sense")
+    ap.add_argument("--web-config", default=None,
+                    help="path to web sense config JSON "
+                         "(default <root>/senses/web.json)")
     ap.add_argument("--sender", default="operator",
                     help="person id for console messages")
     args = ap.parse_args(argv)
@@ -50,7 +55,8 @@ def main(argv=None) -> int:
               file=sys.stderr)
 
     use_console = args.console or (
-        sys.stdin.isatty() and not args.http and not args.telegram)
+        sys.stdin.isatty() and not args.http and not args.telegram
+        and not args.web)
 
     if args.http:
         from .senses.http_sense import HttpSense
@@ -63,6 +69,15 @@ def main(argv=None) -> int:
         cfg = args.telegram_config or os.path.join(
             os.path.abspath(args.root), "senses", "telegram.json")
         shell.add_sense("telegram", TelegramSense(config_path=cfg))
+
+    if args.web:
+        from .senses.web_sense import WebSense
+        cfg = args.web_config or os.path.join(
+            os.path.abspath(args.root), "senses", "web.json")
+        web = WebSense(config_path=cfg)
+        shell.add_sense("web", web)
+        print(f"observatory: http://{web.bind}:{web.port}/?token=… "
+              f"(token in the web sense config)", file=sys.stderr)
 
     if use_console:
         console = ConsoleSense(sender=args.sender)
