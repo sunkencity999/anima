@@ -118,6 +118,7 @@ class TestMessageAndReplies:
         status, doc, _ = call(sense, "POST", "/api/message",
                               {"text": "hello from the dome"})
         assert status == 202 and doc["queued"].startswith("wake-msg-")
+        assert set(doc["recall"]) == {"episodes", "beliefs"}
         results = shell.run_pending_once()
         assert len(results) == 1
         wake = results[0]["wake"]
@@ -146,6 +147,114 @@ class TestMessageAndReplies:
         assert [r["text"] for r in doc["replies"]] == ["the dome hums"]
         _, doc2, _ = call(sense, "GET", "/api/replies")
         assert doc2["replies"] == []
+
+
+class TestMessageRecallMarginalia:
+    """v3: POST /api/message returns the ACL-walled recall snippets the
+    orient phase will surface — the conversation marginalia."""
+
+    def test_recall_surfaces_matching_memories(self, shell_and_sense):
+        shell, sense = shell_and_sense
+        store = shell.entity.store
+        store.add_episode("repaired the telescope focuser", ts=T0 - 60,
+                          scope="shared", tags=["telescope"])
+        store.add_belief("the telescope tracks well after alignment",
+                         ts=T0 - 60)
+        _, doc, _ = call(sense, "POST", "/api/message",
+                         {"text": "how is the telescope doing?"})
+        summaries = " | ".join(e["summary"]
+                               for e in doc["recall"]["episodes"])
+        assert "telescope focuser" in summaries
+        statements = " | ".join(b["statement"]
+                                for b in doc["recall"]["beliefs"])
+        assert "tracks well" in statements
+        ep = doc["recall"]["episodes"][0]
+        assert {"id", "ts", "summary", "kind"} <= set(ep)
+
+    def test_recall_respects_privacy_walls(self, shell_and_sense):
+        shell, sense = shell_and_sense
+        store = shell.entity.store
+        store.add_episode("antonia's secret telescope gift plan",
+                          ts=T0 - 30, scope="private", owner="antonia",
+                          tags=["telescope"])
+        store.add_episode("christopher cleaned the telescope mirror",
+                          ts=T0 - 30, scope="private",
+                          owner="christopher", tags=["telescope"])
+        _, doc, _ = call(sense, "POST", "/api/message",
+                         {"text": "telescope plans?"})
+        summaries = " | ".join(e["summary"]
+                               for e in doc["recall"]["episodes"])
+        assert "cleaned the telescope mirror" in summaries
+        assert "antonia's secret" not in summaries
+
+    def test_recall_empty_when_nothing_matches(self, shell_and_sense):
+        _, sense = shell_and_sense
+        _, doc, _ = call(sense, "POST", "/api/message",
+                         {"text": "zxqvw plumbago"})
+        assert doc["recall"]["episodes"] == []
+
+
+class TestHistory:
+    """v3 time travel: /api/history windows + drive reconstruction."""
+
+    def test_history_requires_auth(self, shell_and_sense):
+        _, sense = shell_and_sense
+        status, _, _ = call(sense, "GET", "/api/history", token="wrong")
+        assert status == 401
+
+    def test_history_windows_ledger_by_until(self, shell_and_sense):
+        shell, sense = shell_and_sense
+        led = shell.entity.ledger
+        led.log("w1", "early_action", "before the cut", ts=1000.0)
+        led.log("w2", "late_action", "after the cut", ts=2000.0)
+        status, doc, _ = call(sense, "GET", "/api/history?until=1500")
+        assert status == 200
+        kinds = [a["kind"] for a in doc["actions"]]
+        assert "early_action" in kinds and "late_action" not in kinds
+        assert doc["until"] == 1500.0
+        assert doc["bounds"]["actions"] >= 2
+        assert doc["bounds"]["oldest"] <= 1000.0
+
+    def test_history_limit_and_defaults(self, shell_and_sense):
+        shell, sense = shell_and_sense
+        for i in range(5):
+            shell.entity.ledger.log(f"w{i}", "tick", str(i), ts=100.0 + i)
+        _, doc, _ = call(sense, "GET", "/api/history?until=200&limit=2")
+        assert len(doc["actions"]) == 2
+        # newest-first within the window
+        assert doc["actions"][0]["ts"] >= doc["actions"][1]["ts"]
+
+    def test_history_reconstructs_drive_pressure(self, tmp_path):
+        clock = {"now": T0}
+        shell = RuntimeShell(
+            str(tmp_path / "tt"), clock=lambda: clock["now"],
+            drives={"curiosity": {"rate_per_hour": 1.0, "threshold": 2.0,
+                                  "description": "explore"}})
+        sense = WebSense({"port": 0, "token": TOKEN, "bind": "127.0.0.1",
+                          "operator_person": "christopher"})
+        shell.add_sense("web", sense)
+        shell.start()
+        try:
+            drives = shell.entity.drives
+            drives.pressure_summary(T0)          # seed event at T0
+            drives.satisfy("curiosity", now=T0 + 3600)  # reset at +1h
+            # halfway between seed and satisfy: 0.5h × 1.0/h = 0.5
+            _, doc, _ = call(sense, "GET",
+                             f"/api/history?until={T0 + 1800}")
+            d = doc["drives"][0]
+            assert d["name"] == "curiosity" and d["reconstructed"]
+            assert abs(d["pressure"] - 0.5) < 1e-6
+            # 30 min AFTER the satisfy: reset anchor + 0.5h growth
+            _, doc2, _ = call(sense, "GET",
+                              f"/api/history?until={T0 + 5400}")
+            assert abs(doc2["drives"][0]["pressure"] - 0.5) < 1e-6
+            # before the drive existed: unknown, zero
+            _, doc3, _ = call(sense, "GET",
+                              f"/api/history?until={T0 - 100}")
+            assert doc3["drives"][0]["pressure"] == 0.0
+            assert doc3["drives"][0]["known"] is False
+        finally:
+            shell.shutdown()
 
 
 class TestMemorySearchACL:

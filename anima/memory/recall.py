@@ -69,13 +69,12 @@ def _matches_filters(item: dict, actors: Optional[set], tags: Optional[set]) -> 
     return True
 
 
-def recall(
+def recall_items(
     store: MemoryStore,
     query: str,
     *,
     actors: Optional[Iterable[str]] = None,
     tags: Optional[Iterable[str]] = None,
-    token_budget: int = 1500,
     max_items: int = 12,
     half_life_days: float = 14.0,
     keyword_weight: float = 0.7,
@@ -83,18 +82,16 @@ def recall(
     now: Optional[float] = None,
     access_context: Optional[Any] = None,
     relationships: Optional[Any] = None,
-) -> str:
-    """Return a markdown context pack for prompt injection.
+) -> dict:
+    """Structured recall: the SELECTION half of recall(), returned as
+    plain dicts instead of rendered markdown.
 
-    When access_context (an anima.relationships.AccessContext) is given,
-    the compiled ACL WHERE clause is applied inside every sqlite query
-    (episodic, semantic, procedural) — rows outside the context's
-    visibility never leave the database. `relationships` (a
-    RelationshipStore) supplies household membership; without it the
-    household set is empty and household-scoped rows stay hidden.
+    Same ranking model, same ACL wall (compiled inside sqlite when an
+    access_context is given). Used by recall() itself and by anything
+    that needs to know *which* memories surfaced for a cue — e.g. the
+    Observatory's conversation marginalia (Phase 6b v3).
 
-    When access_context is None, behavior is exactly pre-Phase-4
-    (single-user mode) and a UserWarning is emitted once per process.
+    Returns {"episodes": [...], "beliefs": [...], "skills": [...]}.
     """
     now = now if now is not None else time.time()
     actor_set = {a.lower() for a in actors} if actors else None
@@ -140,6 +137,46 @@ def recall(
         if q_tokens & {w.lower() for w in (s["name"].replace("-", " ").replace("_", " ")
                                            + " " + s["description"]).split()}
     ][:5]
+
+    return {"episodes": episodes, "beliefs": beliefs, "skills": skills}
+
+
+def recall(
+    store: MemoryStore,
+    query: str,
+    *,
+    actors: Optional[Iterable[str]] = None,
+    tags: Optional[Iterable[str]] = None,
+    token_budget: int = 1500,
+    max_items: int = 12,
+    half_life_days: float = 14.0,
+    keyword_weight: float = 0.7,
+    recency_weight: float = 0.3,
+    now: Optional[float] = None,
+    access_context: Optional[Any] = None,
+    relationships: Optional[Any] = None,
+) -> str:
+    """Return a markdown context pack for prompt injection.
+
+    When access_context (an anima.relationships.AccessContext) is given,
+    the compiled ACL WHERE clause is applied inside every sqlite query
+    (episodic, semantic, procedural) — rows outside the context's
+    visibility never leave the database. `relationships` (a
+    RelationshipStore) supplies household membership; without it the
+    household set is empty and household-scoped rows stay hidden.
+
+    When access_context is None, behavior is exactly pre-Phase-4
+    (single-user mode) and a UserWarning is emitted once per process.
+    """
+    now = now if now is not None else time.time()
+    items = recall_items(
+        store, query, actors=actors, tags=tags, max_items=max_items,
+        half_life_days=half_life_days, keyword_weight=keyword_weight,
+        recency_weight=recency_weight, now=now,
+        access_context=access_context, relationships=relationships)
+    episodes = items["episodes"]
+    beliefs = items["beliefs"]
+    skills = items["skills"]
 
     # ── render within budget ──────────────────────────────────────────
     lines: list[str] = [f"## Recall: {query}", ""]

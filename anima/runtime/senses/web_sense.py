@@ -19,10 +19,16 @@ otherwise). Bearer <token> also works, for tests and curl.
 Endpoints:
     GET  /                    → the Observatory page
     POST /api/message {text}  → direct-context wake from operator_person
+         (202 body also carries `recall`: the ACL-walled memory
+         snippets the orient phase surfaces for this wake — the page's
+         conversation marginalia)
     GET  /api/replies         → drain the outbound reply queue
     GET  /api/lineage         → parsed lineage entries
     GET  /api/drives          → live drive pressures
     GET  /api/ledger?limit=50 → recent ledger rows
+    GET  /api/history?until=<epoch>&limit=50 → time travel: ledger
+         window at/before `until` + drive pressures reconstructed for
+         that moment + timeline bounds. Read-only, windowed on demand.
     GET  /api/memory/search?q=… → episodic+semantic hits through a
          DIRECT AccessContext for operator_person — the Phase 4 wall is
          applied INSIDE sqlite; other people's private rows are
@@ -53,6 +59,8 @@ from typing import Any, Optional
 
 from ...relationships import AccessContext
 from ...relationships.acl import compile_acl
+from ...memory.recall import recall_items
+from ...wake.orient import derive_query
 from ..observatory import LOCK_PAGE, render_page
 from ..sanitize import sanitize_fragment
 
@@ -229,6 +237,27 @@ class WebSense:
                     rows = sense._locked(entity.ledger.recent, limit)
                     return self._json(200, {"actions": rows})
 
+                if path == "/api/history":
+                    # Time travel (Observatory v3): a read-only window
+                    # of the past — ledger rows at/before `until` plus
+                    # drive pressures reconstructed for that moment.
+                    # Windowed on demand; the full ledger never ships.
+                    now = time.time()
+                    until = _float_arg(query, "until", now)
+                    until = max(0.0, min(until, now))
+                    limit = _int_arg(query, "limit", 50, 1, 500)
+                    actions = sense._locked(entity.ledger.window,
+                                            until, limit)
+                    drives = []
+                    if entity.drives is not None:
+                        drives = sense._locked(
+                            entity.drives.history_summary, until)
+                    bounds = sense._locked(entity.ledger.bounds)
+                    return self._json(200, {
+                        "until": until, "now": now,
+                        "actions": actions, "drives": drives,
+                        "bounds": bounds})
+
                 if path == "/api/memory/search":
                     q = (query.get("q") or [""])[0].strip()
                     if not q:
@@ -385,7 +414,34 @@ class WebSense:
                                            channel="observatory")
                 wake = sense.shell.inject_message(
                     sense.operator, text, context=ctx, via="web")
-                return self._json(202, {"queued": wake.wake_id},
+                # Marginalia (Observatory v3): the same ACL-walled
+                # recall the orient phase will run for this wake —
+                # which memories surface while the entity composes.
+                # Same wall as /api/memory/search: the operator's own
+                # direct context, compiled INSIDE sqlite; other
+                # people's private rows are structurally invisible.
+                recall = {"episodes": [], "beliefs": []}
+                try:
+                    items = sense._locked(
+                        recall_items,
+                        sense.shell.entity.store, derive_query(wake),
+                        max_items=6, now=sense.shell.clock(),
+                        access_context=ctx,
+                        relationships=sense.shell.entity.relationships)
+                    recall["episodes"] = [
+                        {"id": e["id"], "ts": e["ts"],
+                         "summary": str(e["summary"])[:200],
+                         "kind": e.get("kind", "event")}
+                        for e in items["episodes"][:6]]
+                    recall["beliefs"] = [
+                        {"id": b["id"],
+                         "statement": str(b["statement"])[:200],
+                         "confidence": b.get("confidence", 0.0)}
+                        for b in items["beliefs"][:4]]
+                except Exception:
+                    pass  # marginalia is garnish; the wake already queued
+                return self._json(202, {"queued": wake.wake_id,
+                                        "recall": recall},
                                   set_cookie=fresh)
 
         self.server = ThreadingHTTPServer((self.bind, self.port), Handler)
@@ -421,6 +477,13 @@ def _int_arg(query, name: str, default: int, lo: int, hi: int) -> int:
     except (TypeError, ValueError):
         val = default
     return max(lo, min(hi, val))
+
+
+def _float_arg(query, name: str, default: float) -> float:
+    try:
+        return float((query.get(name) or [default])[0])
+    except (TypeError, ValueError):
+        return default
 
 
 def _fmt_uptime(seconds: float) -> str:
