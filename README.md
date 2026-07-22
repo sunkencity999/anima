@@ -56,6 +56,33 @@ the operator's GUI cannot surface other people's private rows.
   rejected — **before** storage, and re-sanitized at serve time
   (defense in depth). Stored in an `expressions` table in
   `memory.sqlite` with ts / wake_id / title / kind / body.
+### Observatory v2 (live presence)
+
+The page is no longer a poller pretending to be alive — it is *held
+open*:
+
+- **SSE stream** — `GET /api/stream` (auth-gated like everything else)
+  pushes named events (`ledger`, `expressions`, `drives`, `stats`,
+  `replies`) as deltas over a single held-open connection, with `: beat`
+  comment heartbeats (~15s). The page prefers the stream via
+  `EventSource` and falls back to the original 3s polling whenever the
+  stream drops (reconnecting with exponential backoff). Pure-stdlib
+  streaming on `ThreadingHTTPServer` — no frameworks, of course.
+- **Ambient mood** — the background is an instrument: a two-number mood
+  vector derived from live drive pressures (mean fraction = pressure,
+  max/pending = heat) modulates a background veil's hue (starlight blue
+  → dome amber as a wake approaches) and opacity, plus the plankton
+  drift speed, through lerped CSS custom properties. Nothing decorative
+  that isn't informative of real organism state.
+- **Lineage constellation** — a canvas star map above the biography:
+  every lineage event is a star (warm = init/migration, teal = ordinary
+  life, faint = sleeps), deterministic layout hashed from the entry
+  itself, one faint line threading the life together. Hovering a star
+  glows its biography entry.
+- **Presence** — the dome opens with an iris animation on arrival; if
+  the live stream drops, the room dims gently and the lock pill reads
+  *adrift · the window looks back* until reconnection.
+
 - **Auth**: hit any URL with `?token=<token>` once → HttpOnly cookie;
   every `/api/*` route requires cookie, bearer header, or query token.
   Loopback bind by default, deliberately.
