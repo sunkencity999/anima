@@ -48,7 +48,7 @@ class Ledger:
         ledger_dir = os.path.join(self.entity_root, "ledger")
         os.makedirs(ledger_dir, exist_ok=True)
         self.db_path = os.path.join(ledger_dir, "ledger.sqlite")
-        self.db = sqlite3.connect(self.db_path)
+        self.db = sqlite3.connect(self.db_path, check_same_thread=False)  # shell serializes cross-thread access (Phase 5)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_LEDGER_SCHEMA)
         self.db.commit()

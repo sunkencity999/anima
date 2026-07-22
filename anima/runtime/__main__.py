@@ -1,0 +1,85 @@
+"""CLI: python3 -m anima.runtime --root <entity_root> [--policy routing.json]
+
+Runs a RuntimeShell against an entity root. With --console (default when
+stdin is a TTY and no --http), a console sense chat loop runs in the
+foreground while the scheduler ticks in a background thread. With
+--http, the HTTP sense (senses/http.json inside the root, or --http-config)
+is started and the shell loop runs in the foreground until SIGTERM/SIGINT.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import threading
+
+from .senses.console import ConsoleSense
+from .shell import RuntimeShell
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="python3 -m anima.runtime")
+    ap.add_argument("--root", required=True, help="entity root directory")
+    ap.add_argument("--policy", default=None,
+                    help="routing policy JSON (default: "
+                         "<root>/identity/routing.json via EntityRoot)")
+    ap.add_argument("--tick", type=float, default=0.5,
+                    help="scheduler tick seconds (default 0.5)")
+    ap.add_argument("--console", action="store_true",
+                    help="attach the console sense (default on a TTY)")
+    ap.add_argument("--http", action="store_true",
+                    help="attach the HTTP sense")
+    ap.add_argument("--http-config", default=None,
+                    help="path to http sense config JSON "
+                         "(default <root>/senses/http.json)")
+    ap.add_argument("--sender", default="operator",
+                    help="person id for console messages")
+    args = ap.parse_args(argv)
+
+    shell = RuntimeShell(args.root, policy_path=args.policy,
+                         tick_s=args.tick)
+    if shell.router is None:
+        print("warning: no routing policy found — running with the "
+              "record-only default handler (no model turns)",
+              file=sys.stderr)
+
+    use_console = args.console or (sys.stdin.isatty() and not args.http)
+
+    if args.http:
+        from .senses.http_sense import HttpSense
+        cfg = args.http_config or os.path.join(
+            os.path.abspath(args.root), "senses", "http.json")
+        shell.add_sense("http", HttpSense(config_path=cfg))
+
+    if use_console:
+        console = ConsoleSense(sender=args.sender)
+        shell.add_sense("console", console)
+        shell.start()
+        # scheduler ticks in the background; chat loop owns the terminal
+        loop = threading.Thread(target=_tick_loop, args=(shell,),
+                                daemon=True)
+        loop.start()
+        try:
+            console.run_interactive(shell)
+        except (KeyboardInterrupt, EOFError):
+            pass
+        shell.stop()
+        shell.shutdown()
+        return 0
+
+    shell.run()
+    return 0
+
+
+def _tick_loop(shell: RuntimeShell) -> None:
+    while not shell.stopping:
+        try:
+            shell.run_pending_once()
+        except Exception as exc:  # keep ticking; settle guard has the rest
+            print(f"[shell] tick error: {exc}", file=sys.stderr)
+        shell._stop.wait(shell.tick_s)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

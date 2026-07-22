@@ -72,7 +72,7 @@ class RelationshipStore:
         os.makedirs(self.rel_dir, exist_ok=True)
         self.clock = clock
         self.db_path = os.path.join(self.rel_dir, "relationships.sqlite")
-        self.db = sqlite3.connect(self.db_path)
+        self.db = sqlite3.connect(self.db_path, check_same_thread=False)  # shell serializes cross-thread access (Phase 5)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
         self.db.commit()

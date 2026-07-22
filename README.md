@@ -14,6 +14,10 @@ dependencies (pytest only for the test suite).
   per-person relationship records with *structural* privacy walls
   (scoped memory + SQL-compiled access control), and `EntityRoot`,
   which assembles the whole organism from a directory.
+- **Phase 5 — runtime shell** (Build Order #5): the process. Risk-tiered
+  tool registry (the entity's hands), the agent turn (act phase), a
+  wall-clock shell with pidfile single-writer discipline and graceful
+  shutdown-as-settle, and senses (console / HTTP / OpenClaw bridge).
 
 ## Layout
 
@@ -41,9 +45,16 @@ anima/relationships/
 ├── acl.py          # scope rules compiled to SQL WHERE — the enforcement core
 └── model.py        # RelationshipStore: person records, trust, household, mirrors
 anima/entity.py     # EntityRoot: the whole organism assembled from a directory
+anima/runtime/
+├── tools.py        # ToolRegistry: risk tiers, budgets, built-in hands
+├── agent_turn.py   # the act phase: orient ⊕ identity → model loop → settle report
+├── shell.py        # RuntimeShell: pidfile lock, wall-clock loop, graceful shutdown
+├── __main__.py     # python3 -m anima.runtime --root <entity_root>
+└── senses/         # console.py, http_sense.py, openclaw_bridge.md
 examples/policy.example.json  # realistic chain: azure → azure → local 8103 → ollama
 tests/              # pytest suite (python3 -m pytest)
 demo.py             # deterministic Phase 2 simulation (python3 demo.py)
+demo_runtime.py     # Phase 5 acceptance rehearsal: continuity across death
 ```
 
 # Phase 1: Memory Engine
@@ -397,3 +408,99 @@ and every runtime-version change are recorded events. Public surface:
 - **Write-time scope validation** (`ValueError` on unknown scopes) plus
   read-time deny-by-default: even a corrupted row with `scope='banana'`
   is invisible to every person context.
+
+# Phase 5: Runtime Shell (Build Order #5)
+
+The organism breathes wall-clock air. Design note: `docs/PHASE5_RUNTIME.md`
+(written before implementation, followed as the spec).
+
+## Quick start
+
+```bash
+# talk to an entity on a laptop with zero infrastructure
+python3 -m anima.runtime --root ./entity --console \
+    --policy ./entity/identity/routing.json
+
+# webhook mode (senses/http.json must exist inside the root)
+python3 -m anima.runtime --root ./entity --http
+
+# the acceptance rehearsal: continuity across death, offline
+python3 demo_runtime.py
+```
+
+## The act phase (agent turn)
+
+```
+wake ──► orient (identity soul.md ⊕ orient pack ⊕ wake payload)
+      ──► loop bounded by budget:
+            router.complete(tier(wake), messages,
+                            tools=registry.schemas(risk_cap))
+            tool_calls → registry.execute (ledger row + episodic event)
+            final      → parse ```settle block (or synthesize from trail)
+      ──► wake report ──► settle guard (Phase 2, enforced)
+```
+
+Tier is wake-derived (message/sense→`standard`, drive/timer→`reflex`),
+overridable via `wake.payload["tier"]` — policy picks models, not code.
+
+## The tool registry — hands with a leash
+
+| tool          | risk   | notes                                        |
+|---------------|--------|----------------------------------------------|
+| recall        | low    | carries the WAKE's AccessContext into the ACL |
+| remember      | low    | learning/event/decision → settle pipeline     |
+| set_timer     | low    | schedules the entity's own future wake        |
+| satisfy_drive | low    | closes a drive loop                           |
+| reply         | low    | outbound via the wake's originating sense     |
+| http_get      | medium | read-only web (injectable transport)          |
+| shell         | high   | needs entity opt-in AND risk_cap=high         |
+
+Defense in depth, same as the ACLs: the schema list *offered* to the
+model is filtered by the wake's risk_cap, AND execution re-checks — a
+hallucinated call to an unoffered tool is denied structurally (denials
+are free; only real executions spend `max_actions`). Budget exhaustion
+ends the turn with a truthful report, never a fake completion.
+
+## The shell
+
+- **Single-writer:** pidfile lock; a second shell against a live root is
+  refused ("two runtimes sharing a self is corruption, not concurrency").
+- **Graceful shutdown is a settle event:** SIGTERM/SIGINT → drain →
+  settle a "shutdown" episode → lineage entry. The entity always knows
+  it went to sleep.
+- **Senses** run in their own threads and only *inject*; one dispatch
+  lock serializes all wake execution (sqlite stays single-writer).
+
+## Senses
+
+- `console` — stdin/stdout chat, injectable I/O.
+- `http_sense` — stdlib http.server, bearer-token auth, loopback bind by
+  default. `POST /message` / `POST /event` inject wakes with proper
+  AccessContexts; replies go to a `callback_url` or drain via
+  `GET /replies`. External callers cannot claim `kind:"system"`.
+- `openclaw_bridge.md` — how OpenClaw forwards inbound messages to the
+  http sense and relays replies back: OpenClaw as a *peripheral*.
+
+## Phase 5 design decisions beyond spec
+
+- **The orient pack is ACL-walled too** (found during build): `orient()`
+  now takes the wake's AccessContext, so a group wake's *prompt* cannot
+  leak private rows before the model even acts. The recall tool being
+  walled is not enough if the runtime itself leaks in the system prompt.
+- **Context defaulting:** a non-message wake without an AccessContext is
+  the entity waking itself (drive/timer) and runs as `system` — the
+  organism knows its own mind. A message wake missing a context falls
+  back to direct-with-sender, never system.
+- **Denials don't spend budget:** the model pays for actions, not for
+  being told no — otherwise a low-cap wake could be starved into
+  uselessness by its own hallucinated high-risk calls.
+- **Risk-cap vocabulary fails closed:** wake budgets say
+  low/normal/high; `normal` maps to `medium`, anything unrecognized
+  maps to `low`.
+- **Sense threads never run wakes:** HTTP handlers only inject; the
+  shell loop owns dispatch. Keeps settle/ledger ordering coherent and
+  sqlite happy (`check_same_thread=False` + one dispatch lock).
+- **`json tail` settle fallback:** small local models are bad at fences;
+  a bare trailing JSON object also parses as a settle block, and if
+  nothing parses the runtime synthesizes the report from the ledger
+  trail — the enforced-settle guarantee never depends on model manners.

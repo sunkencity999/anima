@@ -171,7 +171,8 @@ CREATE TABLE IF NOT EXISTS drive_state (
 def _open_wake_db(entity_root: str) -> sqlite3.Connection:
     wake_dir = os.path.join(os.path.abspath(entity_root), "wake")
     os.makedirs(wake_dir, exist_ok=True)
-    db = sqlite3.connect(os.path.join(wake_dir, "wake.sqlite"))
+    db = sqlite3.connect(os.path.join(wake_dir, "wake.sqlite"),
+                         check_same_thread=False)  # shell serializes (Phase 5)
     db.row_factory = sqlite3.Row
     db.executescript(_WAKE_SCHEMA)
     db.commit()

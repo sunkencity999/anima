@@ -166,8 +166,10 @@ body = new binding file, not a new engineering project.
 4. ✅ **ledger + relationship ACLs.** (ledger landed with Phase 2; relationship
    ACLs + `EntityRoot` assembly landed as Phase 4 — scoped memory rows,
    SQL-compiled access control, household walls, lineage log.)
-5. **runtime shell** that can wear OpenClaw's channels as senses — migration
-   path, not big-bang rewrite.
+5. ✅ **runtime shell** that can wear OpenClaw's channels as senses — migration
+   path, not big-bang rewrite. (Phase 5: risk-tiered tool registry, the agent
+   turn / act phase, pidfile-locked wall-clock shell with graceful
+   shutdown-as-settle, console + HTTP senses, OpenClaw bridge doc.)
 
 The deepest design decision is #1. Everything else orbits it, because the
 thesis of the whole project is: **continuity is the product.** A model is a

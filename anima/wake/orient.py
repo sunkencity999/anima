@@ -11,6 +11,11 @@ Design notes:
   wake" principle.
 - Timer and drive sources are optional: a minimal runtime that only has
   messages still gets a valid pack.
+- Phase 5 addition: orient accepts the wake's access_context (plus the
+  RelationshipStore for household membership) and passes it into recall,
+  so the PROMPT itself is ACL-walled — not just the recall tool. Without
+  it, a group wake's orient pack could leak private rows straight into
+  the model context, defeating the Phase 4 walls.
 """
 
 from __future__ import annotations
@@ -53,6 +58,8 @@ def orient(
     drive_source: Optional[DriveSource] = None,
     token_budget: int = 1500,
     max_intentions: int = 8,
+    access_context: Optional[object] = None,
+    relationships: Optional[object] = None,
 ) -> str:
     """Build the orient-phase markdown context pack for a wake."""
     lines: list[str] = [
@@ -79,7 +86,9 @@ def orient(
     lines.append("")
 
     # ── memory recall keyed on the wake itself ────────────────────────
-    pack = recall(store, derive_query(wake), token_budget=token_budget, now=now)
+    pack = recall(store, derive_query(wake), token_budget=token_budget,
+                  now=now, access_context=access_context,
+                  relationships=relationships)
     lines.append(pack.rstrip())
     lines.append("")
 
