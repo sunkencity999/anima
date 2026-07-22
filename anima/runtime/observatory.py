@@ -15,6 +15,16 @@ arrive with a soft bloom, the lineage is an illuminated timeline of
 births, sleeps and migrations. Nothing shouts; everything glows a
 little. This is not an admin panel — it is a window into a living
 thing, and it should feel like one.
+
+v3 (conversation-primary): the dialogue with the entity is the
+centerpiece; instruments (drives, lineage, expressions, ledger, memory)
+arrange around it as the supporting observatory. While the entity
+composes, the memories it recalled surface as faint marginalia beside
+the conversation. A time-travel scrub replays the ledger, the drive
+gauges and the ambient mood as they were at any past moment (windowed
+/api/history fetches — the past is read on demand, never shipped
+wholesale). The whole page collapses gracefully to a phone: checking
+on your entity from bed is a first-class use case.
 """
 
 from __future__ import annotations
@@ -44,6 +54,9 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; }
+html { background: var(--abyss); }  /* base under the fixed gradients —
+  keeps overscroll/long pages dark on phones where background-attachment:
+  fixed degrades */
 body {
   font-family: var(--sans); color: var(--ink);
   background:
@@ -85,7 +98,7 @@ body::after {
       transparent 60%);
 }
 
-.wrap { max-width: 1220px; margin: 0 auto; padding: 22px 24px 70px;
+.wrap { max-width: 1380px; margin: 0 auto; padding: 22px 24px 70px;
         position: relative; z-index: 1; }
 
 /* ── header ── */
@@ -127,13 +140,22 @@ header .spacer { flex: 1; }
 .empty { color: var(--ink-faint); font-size: 13px; font-style: italic;
   font-family: var(--serif); padding: 14px 6px; }
 
-/* ── main grid: expressions are the centerpiece ── */
-.grid { display: grid; grid-template-columns: minmax(0, 8fr) minmax(0, 5fr);
-  gap: 20px; align-items: start; }
-@media (max-width: 940px) { .grid { grid-template-columns: 1fr; } }
+/* ── main grid: the CONVERSATION is the centerpiece (v3) ──
+   Instruments arrange around the dialogue: drives + lineage on the
+   left rail, expressions + ledger + memory on the right. DOM order
+   puts the conversation first, so on a phone the stack begins with
+   the dialogue — the layout collapses toward its own priorities. */
+.obsgrid { display: grid; gap: 20px; align-items: start;
+  grid-template-columns: minmax(240px, 3fr) minmax(0, 6fr)
+                         minmax(260px, 4fr);
+  grid-template-areas: "left centre right"; }
+.centre { grid-area: centre; min-width: 0; }
+.rail-l { grid-area: left;  min-width: 0; }
+.rail-r { grid-area: right; min-width: 0; }
+.rail-l .panel, .rail-r .panel { margin-bottom: 20px; }
 
 /* ── the art wall ── */
-#exprs { columns: 2 240px; column-gap: 14px; max-height: 620px;
+#exprs { columns: 2 190px; column-gap: 14px; max-height: 460px;
   overflow-y: auto; padding: 2px; }
 .card { break-inside: avoid; margin: 0 0 14px; border: 1px solid var(--line);
   border-radius: 12px; background:
@@ -159,9 +181,45 @@ header .spacer { flex: 1; }
 .card .cap .when { font-family: var(--mono); font-size: 9.5px;
   color: var(--ink-faint); }
 
-/* ── chat ── */
-#chatlog { height: 470px; overflow-y: auto; display: flex;
+/* ── conversation: the centerpiece ──
+   .convo grows a marginalia column (recalled memories) when the
+   entity is composing; otherwise the dialogue takes the full width. */
+.convo { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+.convo.noted { grid-template-columns: 172px minmax(0, 1fr); }
+#chatlog { height: clamp(380px, 58vh, 680px); overflow-y: auto;
+  display: flex;
   flex-direction: column; gap: 9px; padding: 4px 2px; scroll-behavior: smooth; }
+
+/* ── marginalia: what memory surfaced while it was composing ──
+   Faint by design — these are the entity's half-thoughts, not content.
+   They brighten while composing and settle (dim further) once the
+   reply lands. Fed by the ACL-walled recall payload of /api/message. */
+.marginalia { display: none; }
+.marginalia.has { display: block; border-right: 1px solid var(--line);
+  padding-right: 12px; max-height: clamp(380px, 58vh, 680px);
+  overflow-y: auto; }
+.marginalia .mhead { font-family: var(--mono); font-size: 8.5px;
+  letter-spacing: .24em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 2px 0 10px; }
+.mnote { font-family: var(--serif); font-style: italic; font-size: 11.5px;
+  line-height: 1.55; color: var(--ink-dim); margin: 0 0 12px;
+  opacity: 0; transition: opacity 1.4s ease; }
+.mnote.shown { opacity: .78; }
+.mnote.settled { opacity: .32; }
+.mnote .mtag { display: block; font-family: var(--mono);
+  font-style: normal; font-size: 8.5px; letter-spacing: .2em;
+  text-transform: uppercase; color: var(--glow); opacity: .85;
+  margin-bottom: 2px; }
+.mnote.belief .mtag { color: var(--lamp); }
+
+/* ── composing indicator ── */
+.msg.thinking .dots i { display: inline-block; font-style: normal;
+  color: var(--lamp); font-size: 17px; line-height: .6;
+  animation: thinkp 1.4s ease-in-out infinite; }
+.msg.thinking .dots i:nth-child(2) { animation-delay: .22s; }
+.msg.thinking .dots i:nth-child(3) { animation-delay: .44s; }
+@keyframes thinkp { 0%,100% { opacity: .2; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-2px); } }
 .msg { max-width: 88%; padding: 9px 13px; border-radius: 12px; font-size: 14px;
   line-height: 1.5; white-space: pre-wrap; word-break: break-word;
   animation: surface .5s cubic-bezier(.22,1,.36,1) both; }
@@ -188,11 +246,6 @@ button { background: linear-gradient(180deg, rgba(94,234,212,.14),
   letter-spacing: .06em; transition: box-shadow .3s; }
 button:hover { box-shadow: 0 0 20px rgba(94,234,212,.3); }
 button:disabled { opacity: .4; cursor: default; box-shadow: none; }
-
-/* ── lower row ── */
-.threecol { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.1fr)
-  minmax(0,1.3fr); gap: 20px; margin-top: 20px; }
-@media (max-width: 940px) { .threecol { grid-template-columns: 1fr; } }
 
 /* ── drives: breathing radial gauges ── */
 #drives { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center;
@@ -291,6 +344,106 @@ body:not(.adrift) .wrap { transition: filter 1.2s ease; }
 body.adrift .pill .dot { background: var(--ink-faint); box-shadow: none;
   animation: none; }
 
+/* ── time travel ──
+   The scrub is an instrument: your position in the entity's biography.
+   The thumb is the dome lamp — warm at “now”; drag it back and the
+   whole room goes cold and desaturated (the lamp belongs to the
+   present). Hidden until the ledger has any history at all. */
+.timebar { display: flex; align-items: center; gap: 14px;
+  margin-bottom: 20px; padding: 10px 18px; }
+.timebar[hidden] { display: none; }
+.timebar .tword { font-family: var(--serif); font-style: italic;
+  font-size: 12px; color: var(--ink-dim); letter-spacing: .14em;
+  white-space: nowrap; }
+#tlab { font-family: var(--mono); font-size: 11px; color: var(--ink);
+  min-width: 110px; text-align: right; white-space: nowrap; }
+#nowbtn { padding: 7px 14px; font-size: 12px; white-space: nowrap; }
+#scrub { -webkit-appearance: none; appearance: none; flex: 1;
+  min-width: 0; height: 28px; background: transparent; cursor: pointer;
+  margin: 0; }
+#scrub::-webkit-slider-runnable-track { height: 3px; border-radius: 2px;
+  background: linear-gradient(90deg, rgba(94,234,212,.08),
+              rgba(94,234,212,.4)); }
+#scrub::-webkit-slider-thumb { -webkit-appearance: none; width: 18px;
+  height: 18px; margin-top: -7.5px; border-radius: 50%; border: none;
+  background: var(--lamp); box-shadow: 0 0 14px rgba(255,180,94,.75); }
+#scrub::-moz-range-track { height: 3px; border-radius: 2px;
+  background: linear-gradient(90deg, rgba(94,234,212,.08),
+              rgba(94,234,212,.4)); }
+#scrub::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%;
+  border: none; background: var(--lamp);
+  box-shadow: 0 0 14px rgba(255,180,94,.75); }
+body.past #scrub::-webkit-slider-thumb { background: var(--glow2);
+  box-shadow: 0 0 14px rgba(127,212,255,.75); }
+body.past #scrub::-moz-range-thumb { background: var(--glow2);
+  box-shadow: 0 0 14px rgba(127,212,255,.75); }
+.pill.warm { color: var(--lamp); border-color: rgba(255,180,94,.4);
+  animation: lamp 3s ease-in-out infinite; }
+
+/* viewing the past: the lamp goes cold, the room desaturates — the
+   present is the only time that gets the warm light */
+body.past .wrap { filter: saturate(.72) brightness(.86); }
+body.past header h1 .dome { color: var(--glow2); animation: none;
+  text-shadow: 0 0 18px rgba(127,212,255,.6); }
+body.past .ln.fresh { animation: none; }
+body.past #chatform button, body.past #chatinput { opacity: .85; }
+.drive.ghost { opacity: .35; }   /* pressure unknown for that moment */
+
+/* ── foldable panels (mobile: collapse the instruments, keep the
+   conversation) — headers become 44px+ touch targets ── */
+[data-fold] > h2 { cursor: pointer; -webkit-user-select: none;
+  user-select: none; }
+[data-fold] > h2::before { content: "⌄"; float: right; font-style: normal;
+  color: var(--ink-faint); margin-left: 8px;
+  transition: transform .3s ease; }
+.panel.folded > h2::before { transform: rotate(-90deg); }
+.panel.folded > h2 { margin-bottom: 0; }
+.panel.folded > :not(h2) { display: none !important; }  /* !important:
+  outranks id-specificity display rules (#constellation, #memform) */
+
+/* ── responsive: the observatory folds toward the dialogue ── */
+@media (max-width: 1240px) {
+  .obsgrid { grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+    grid-template-areas: "centre centre" "left right"; }
+}
+@media (max-width: 980px) {
+  .obsgrid { grid-template-columns: minmax(0,1fr);
+    grid-template-areas: "centre" "left" "right"; }
+  #chatlog { height: min(52dvh, 460px); }
+  .marginalia.has { border-right: none;
+    border-bottom: 1px solid var(--line); padding: 0 0 8px;
+    max-height: none; display: flex; gap: 12px; overflow-x: auto;
+    overflow-y: hidden; }
+  .convo.noted { grid-template-columns: minmax(0,1fr); }
+  .marginalia .mhead { display: none; }
+  .mnote { flex: 0 0 200px; margin: 0; font-size: 11px; }
+}
+@media (max-width: 700px) {
+  .wrap { padding: 12px 12px 44px; }
+  header { gap: 10px; padding-bottom: 14px; margin-bottom: 14px; }
+  header h1 { font-size: 22px; }
+  header .sub { display: none; }
+  .pill { font-size: 10px; padding: 4px 10px; }
+  .panel { padding: 12px 14px; border-radius: 12px;
+    backdrop-filter: none; }         /* cheap on phone GPUs */
+  .obsgrid { gap: 14px; }
+  .rail-l .panel, .rail-r .panel { margin-bottom: 14px; }
+  #chatlog { height: min(48dvh, 420px); }
+  .msg { max-width: 94%; font-size: 15px; }
+  #chatinput, #meminput { font-size: 16px; min-height: 44px; }
+  button { min-height: 44px; padding: 10px 18px; }
+  #exprs { columns: 1; max-height: 380px; }
+  .drive { width: 104px; }
+  .timebar { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
+  .timebar .tword { display: none; }
+  #tlab { min-width: 0; }
+  #scrub { flex: 1 1 100%; order: -1; }
+  #scrub::-webkit-slider-thumb { width: 24px; height: 24px;
+    margin-top: -10.5px; }
+  #scrub::-moz-range-thumb { width: 24px; height: 24px; }
+  #lineage, #ledger { max-height: 240px; }
+}
+
 footer { margin-top: 30px; text-align: center; font-family: var(--serif);
   font-style: italic; font-size: 11px; color: var(--ink-faint);
   letter-spacing: .18em; }
@@ -314,61 +467,86 @@ footer { margin-top: 30px; text-align: center; font-family: var(--serif);
     <span class="pill" id="statpill">—</span>
   </header>
 
-  <div class="grid">
-    <section class="panel">
-      <h2><span class="tick">✶</span> expressions
-        <span class="note">what it chose to show</span></h2>
-      <div id="exprs"><div class="empty">Nothing expressed yet — the wall
-        waits for its first light.</div></div>
-    </section>
-
-    <section class="panel">
-      <h2><span class="tick">✶</span> conversation</h2>
-      <div id="chatlog"><div class="empty">Say something. The entity wakes
-        when spoken to.</div></div>
-      <form id="chatform">
-        <input id="chatinput" autocomplete="off"
-               placeholder="speak into the dome…">
-        <button type="submit" id="sendbtn">Send</button>
-      </form>
-    </section>
+  <!-- time travel: your position in the entity's biography -->
+  <div class="timebar panel" id="timebar" hidden>
+    <span class="tword">time</span>
+    <input type="range" id="scrub" min="0" max="1000" value="1000"
+           step="1" aria-label="time travel: scrub through history">
+    <span id="tlab">now</span>
+    <span class="pill warm" id="pastpill" hidden>◷ viewing the past</span>
+    <button type="button" id="nowbtn" hidden>return to now</button>
   </div>
 
-  <div class="threecol">
-    <section class="panel">
-      <h2><span class="tick">✶</span> drives</h2>
-      <div id="drives"><div class="empty">No drives configured.</div></div>
-    </section>
+  <div class="obsgrid">
+    <!-- centerpiece: the dialogue (first in DOM → first on a phone) -->
+    <main class="centre">
+      <section class="panel">
+        <h2><span class="tick">✶</span> conversation
+          <span class="note">the dialogue is the centerpiece</span></h2>
+        <div class="convo" id="convo">
+          <aside id="marginalia" class="marginalia"
+                 aria-label="memories recalled while composing"></aside>
+          <div class="convo-main">
+            <div id="chatlog"><div class="empty">Say something. The entity
+              wakes when spoken to.</div></div>
+            <form id="chatform">
+              <input id="chatinput" autocomplete="off"
+                     placeholder="speak into the dome…">
+              <button type="submit" id="sendbtn">Send</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
 
-    <section class="panel">
-      <h2><span class="tick">✶</span> lineage
-        <span class="note">a biography</span></h2>
-      <canvas id="constellation" height="120"></canvas>
-      <div id="lineage"></div>
-    </section>
+    <!-- left rail: the body's instruments -->
+    <aside class="rail-l">
+      <section class="panel" data-fold="drives">
+        <h2><span class="tick">✶</span> drives</h2>
+        <div id="drives"><div class="empty">No drives configured.</div></div>
+      </section>
 
-    <section class="panel">
-      <h2><span class="tick">✶</span> ledger
-        <span class="note">every action has a receipt</span></h2>
-      <div id="ledger"></div>
-    </section>
+      <section class="panel" data-fold="lineage">
+        <h2><span class="tick">✶</span> lineage
+          <span class="note">a biography</span></h2>
+        <canvas id="constellation" height="120"></canvas>
+        <div id="lineage"></div>
+      </section>
+    </aside>
+
+    <!-- right rail: what it made, what it did, what it knows -->
+    <aside class="rail-r">
+      <section class="panel" data-fold="exprs">
+        <h2><span class="tick">✶</span> expressions
+          <span class="note">what it chose to show</span></h2>
+        <div id="exprs"><div class="empty">Nothing expressed yet — the wall
+          waits for its first light.</div></div>
+      </section>
+
+      <section class="panel" data-fold="ledger">
+        <h2><span class="tick">✶</span> ledger
+          <span class="note">every action has a receipt</span></h2>
+        <div id="ledger"></div>
+      </section>
+
+      <section class="panel" data-fold="memory">
+        <h2><span class="tick">✶</span> memory</h2>
+        <form id="memform">
+          <input id="meminput" autocomplete="off"
+                 placeholder="search episodic + semantic memory…">
+          <button type="submit">Recall</button>
+        </form>
+        <div id="memresults"></div>
+      </section>
+    </aside>
   </div>
-
-  <section class="panel" style="margin-top:20px">
-    <h2><span class="tick">✶</span> memory</h2>
-    <form id="memform">
-      <input id="meminput" autocomplete="off"
-             placeholder="search episodic + semantic memory…">
-      <button type="submit">Recall</button>
-    </form>
-    <div id="memresults"></div>
-  </section>
 
   <footer>anima · the agent is the artifact · continuity is the product</footer>
 </div>
 
 <script>
 "use strict";
+const ENT = "__NAME__";
 const $ = id => document.getElementById(id);
 const esc = s => { const d = document.createElement("span");
                    d.textContent = s == null ? "" : String(s);
@@ -392,23 +570,78 @@ function addMsg(who, cls, text) {
   $("chatlog").appendChild(div);
   $("chatlog").scrollTop = $("chatlog").scrollHeight;
 }
+/* composing indicator: a breathing amber ellipsis while the entity
+   is somewhere between hearing and answering */
+function addThinking() {
+  removeThinking();
+  if (chatEmpty) { $("chatlog").innerHTML = ""; chatEmpty = false; }
+  const div = document.createElement("div");
+  div.className = "msg ent thinking"; div.id = "thinkmsg";
+  div.innerHTML = '<span class="who">' + esc(ENT) + "</span>" +
+    '<span class="dots"><i>●</i> <i>●</i> <i>●</i></span>';
+  $("chatlog").appendChild(div);
+  $("chatlog").scrollTop = $("chatlog").scrollHeight;
+}
+function removeThinking() {
+  const el = $("thinkmsg");
+  if (el) el.remove();
+}
+
 $("chatform").addEventListener("submit", async ev => {
   ev.preventDefault();
   const text = $("chatinput").value.trim();
   if (!text) return;
   $("chatinput").value = "";
   addMsg("you", "you", text);
+  addThinking();
   try {
-    await api("/api/message", { method: "POST",
+    const res = await api("/api/message", { method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }) });
-  } catch (e) { addMsg("observatory", "ent", "⚠ send failed: " + e.message); }
+    renderMarginalia(res.recall);
+  } catch (e) {
+    removeThinking();
+    addMsg("observatory", "ent", "⚠ send failed: " + e.message);
+  }
 });
 
 function renderReplies(doc) {
-  for (const r of (doc.replies || [])) addMsg(doc.entity || "entity", "ent", r.text);
+  const rs = doc.replies || [];
+  if (rs.length) { removeThinking(); settleMarginalia(); }
+  for (const r of rs) addMsg(doc.entity || "entity", "ent", r.text);
 }
 async function pollReplies() { renderReplies(await api("/api/replies")); }
+
+/* ── marginalia: memories recalled while composing ──
+   The POST /api/message response carries the ACL-walled episode and
+   belief snippets the orient phase surfaces for that wake — the
+   entity's half-thoughts, rendered faint beside the dialogue. They
+   settle (dim) once the reply arrives. */
+function renderMarginalia(rec) {
+  const box = $("marginalia");
+  const items = [];
+  for (const b of ((rec || {}).beliefs || []))
+    items.push({ tag: "belief", text: b.statement, cls: "belief" });
+  for (const e of ((rec || {}).episodes || []))
+    items.push({ tag: fmtTs(e.ts) || "episode", text: e.summary,
+                 cls: "episode" });
+  if (!items.length) return;               /* keep the last set visible */
+  box.innerHTML = '<div class="mhead">recalled while composing</div>';
+  box.classList.add("has");
+  $("convo").classList.add("noted");
+  for (const it of items.slice(0, 8)) {
+    const d = document.createElement("div");
+    d.className = "mnote " + it.cls;
+    d.innerHTML = '<span class="mtag">' + esc(it.tag) + "</span>" +
+                  esc(it.text);
+    box.appendChild(d);
+    requestAnimationFrame(() => d.classList.add("shown"));
+  }
+}
+function settleMarginalia() {
+  for (const el of document.querySelectorAll(".mnote"))
+    el.classList.add("settled");
+}
 
 /* ── the art wall ── */
 const seenExprs = new Set();
@@ -454,7 +687,9 @@ function renderDrives(doc) {
     /* breath rate: calm 8s at zero pressure → urgent 2.2s at full */
     const breath = (8 - 5.8 * frac).toFixed(2) + "s";
     const el = document.createElement("div");
-    el.className = "drive";
+    /* .ghost: reconstructed moment before this drive existed — the
+       gauge is shown but honestly dim (pressure unknown, zero) */
+    el.className = "drive" + (d.known === false ? " ghost" : "");
     el.innerHTML =
       '<div class="ring' + (hot ? " hot" : "") + '">' +
         '<svg width="96" height="96" viewBox="0 0 96 96">' +
@@ -476,7 +711,7 @@ function renderDrives(doc) {
     });
   }
 }
-async function pollDrives() { renderDrives(await api("/api/drives")); }
+async function pollDrives() { liveDrives(await api("/api/drives")); }
 
 /* ── ambient mood ──
    The background is an instrument, not a decoration. From the live
@@ -618,7 +853,84 @@ function renderLedger(doc, initial) {
   maxLedgerId = Math.max(maxLedgerId, newest);
 }
 async function pollLedger() {
-  renderLedger(await api("/api/ledger?limit=50"), firstPaint);
+  liveLedger(await api("/api/ledger?limit=50"), firstPaint);
+}
+
+/* ── time travel ──
+   The scrub maps [oldest ledger ts … now] onto 0…1000. Dragging back
+   fetches a window of the past (/api/history?until=… — on demand,
+   never the whole ledger) and re-renders the ledger, the drive gauges
+   and — through renderDrives → setMoodFromDrives — the ambient mood as
+   they were at that moment. Live SSE/poll updates for those panels are
+   stashed while in the past and replayed on return; the conversation
+   stays live (the dialogue is the present, always). */
+const past = { active: false };
+const stash = { ledger: null, drives: null };
+let tBounds = null, scrubTimer = null;
+
+function liveLedger(doc, initial) {
+  if (past.active) { stash.ledger = doc; return; }
+  renderLedger(doc, initial);
+}
+function liveDrives(doc) {
+  if (past.active) { stash.drives = doc; return; }
+  renderDrives(doc);
+}
+
+async function initTimebar() {
+  try {
+    const doc = await api("/api/history?limit=1");
+    if (doc.bounds && doc.bounds.oldest != null &&
+        doc.now - doc.bounds.oldest > 5) {
+      tBounds = doc.bounds;
+      $("timebar").hidden = false;
+    }
+  } catch (e) { /* no history yet: the bar stays hidden */ }
+}
+
+$("scrub").addEventListener("input", () => {
+  if (!tBounds) return;
+  const v = +$("scrub").value;
+  if (v >= 998) { returnToNow(); return; }
+  const nowS = Date.now() / 1000;
+  const t = tBounds.oldest + (v / 1000) * (nowS - tBounds.oldest);
+  $("tlab").textContent = fmtTs(t);
+  clearTimeout(scrubTimer);
+  scrubTimer = setTimeout(() => fetchPast(t), 180);
+});
+$("nowbtn").addEventListener("click", returnToNow);
+
+async function fetchPast(t) {
+  try {
+    const doc = await api("/api/history?until=" + t.toFixed(1)
+                          + "&limit=50");
+    enterPast(doc);
+  } catch (e) { /* a failed window fetch just leaves the view as-is */ }
+}
+function enterPast(doc) {
+  past.active = true;
+  document.body.classList.add("past");
+  $("pastpill").hidden = false;
+  $("nowbtn").hidden = false;
+  $("tlab").textContent = fmtTs(doc.until);
+  renderLedger({ actions: doc.actions }, true);   /* no fresh blooms */
+  renderDrives({ drives: doc.drives });           /* mood follows     */
+}
+function returnToNow() {
+  const was = past.active;
+  past.active = false;
+  document.body.classList.remove("past");
+  $("pastpill").hidden = true;
+  $("nowbtn").hidden = true;
+  $("scrub").value = 1000;
+  $("tlab").textContent = "now";
+  clearTimeout(scrubTimer);
+  if (!was) return;
+  if (stash.ledger) renderLedger(stash.ledger, true);
+  else pollLedger().catch(() => {});
+  if (stash.drives) renderDrives(stash.drives);
+  else pollDrives().catch(() => {});
+  stash.ledger = stash.drives = null;
 }
 
 /* ── stats / lock ── */
@@ -671,13 +983,13 @@ function connectStream() {
                       setAdrift(false); };
   es.addEventListener("ledger", ev => {
     const doc = JSON.parse(ev.data);
-    renderLedger(doc, !(doc.fresh_ids || []).length);
+    liveLedger(doc, !(doc.fresh_ids || []).length);
   });
   es.addEventListener("expressions", ev => {
     const doc = JSON.parse(ev.data);
     renderExpressions(doc, !!doc.initial);
   });
-  es.addEventListener("drives", ev => renderDrives(JSON.parse(ev.data)));
+  es.addEventListener("drives", ev => liveDrives(JSON.parse(ev.data)));
   es.addEventListener("stats", ev => renderStats(JSON.parse(ev.data)));
   es.addEventListener("replies", ev => renderReplies(JSON.parse(ev.data)));
   es.onerror = () => {                     /* fall back to polling */
@@ -709,6 +1021,25 @@ function openIris() {                      /* the dome opens on arrival */
 }
 openIris();
 
+/* ── foldable panels ──
+   Every instrument header is a toggle (44px+ touch target). On a phone
+   the noisier instruments start folded — the conversation is what you
+   came for; the rest waits one tap away. */
+for (const sec of document.querySelectorAll("[data-fold]")) {
+  sec.querySelector("h2").addEventListener("click", () => {
+    sec.classList.toggle("folded");
+    if (sec.dataset.fold === "lineage" && !sec.classList.contains("folded"))
+      requestAnimationFrame(() => drawConstellation(-1));
+  });
+}
+if (window.matchMedia("(max-width: 700px)").matches) {
+  for (const name of ["ledger", "lineage", "memory"]) {
+    const sec = document.querySelector('[data-fold="' + name + '"]');
+    if (sec) sec.classList.add("folded");
+  }
+}
+window.addEventListener("resize", () => drawConstellation(hoverIdx));
+
 /* ── main loop ── */
 let firstPaint = true;
 async function tick() {
@@ -721,6 +1052,8 @@ async function tick() {
 pollLineage(); setInterval(pollLineage, 30000);
 tick(); setInterval(tick, 3000);
 connectStream();
+initTimebar(); setInterval(() => { if (!past.active) initTimebar(); },
+                           60000);
 </script>
 </body>
 </html>
@@ -752,4 +1085,8 @@ def render_page(entity_name: str) -> str:
     """Fill the page template. (No str.format — the CSS is full of
     braces; a plain marker replace is the honest tool here.)"""
     safe = (entity_name or "anima").replace("<", "").replace(">", "")
+    # __NAME__ also lands inside a JS string literal (const ENT): strip
+    # quote/backslash so a hostile directory name can't escape it.
+    safe = (safe.replace("\\", "").replace('"', "").replace("'", "")
+            .replace("`", ""))
     return PAGE_TEMPLATE.replace("__NAME__", safe)

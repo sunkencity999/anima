@@ -111,6 +111,23 @@ class TestPage:
         assert "cdn" not in html.lower()    # no external anything
         assert "fonts.googleapis" not in html
 
+    def test_page_v3_features_present(self, shell_and_sense):
+        """v3: conversation-primary grid, marginalia, time travel,
+        mobile media queries + reduced-motion — all inline, no assets."""
+        _, sense = shell_and_sense
+        status, body, _ = call(sense, "GET", "/", raw=True)
+        assert status == 200
+        html = body.decode()
+        assert 'class="obsgrid"' in html          # conversation-primary
+        assert 'id="marginalia"' in html          # recall marginalia
+        assert 'id="scrub"' in html               # time travel scrub
+        assert "/api/history" in html             # windowed past fetch
+        assert "viewing the past" in html         # past-mode pill
+        assert "@media (max-width: 700px)" in html  # phone layout
+        assert "prefers-reduced-motion" in html
+        assert 'name="viewport"' in html
+        assert 'const ENT = "luna"' in html       # name inside JS string
+
 
 class TestMessageAndReplies:
     def test_message_injects_operator_direct_wake(self, shell_and_sense):
