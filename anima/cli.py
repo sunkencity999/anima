@@ -467,6 +467,31 @@ def cmd_sky(args) -> int:
     return 0
 
 
+# ── service (systemd user unit: boot + crash resiliency) ──────────
+
+def cmd_service(args) -> int:
+    from .service import ServiceManager
+    mgr = ServiceManager()
+    try:
+        if args.verb == "install":
+            return mgr.install(args.root, name=args.name,
+                               web=not args.no_web,
+                               telegram=args.telegram,
+                               force=args.force)
+        if args.verb == "status":
+            return mgr.status(args.root, name=args.name)
+        if args.verb == "stop":
+            return mgr.stop(args.root, name=args.name)
+        if args.verb == "restart":
+            return mgr.restart(args.root, name=args.name)
+        if args.verb == "uninstall":
+            return mgr.uninstall(args.root, name=args.name)
+        raise AssertionError(args.verb)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 # ── entry point ───────────────────────────────────────────────────────
 
 def main(argv=None) -> int:
@@ -520,6 +545,25 @@ def main(argv=None) -> int:
     p.add_argument("--bind", default=None,
                    help="override the configured bind address")
     p.set_defaults(func=cmd_sky)
+
+    p = sub.add_parser("service",
+                       help="run the entity as a systemd user service "
+                            "(auto-start at boot, auto-restart on "
+                            "crash)")
+    p.add_argument("verb", choices=("install", "status", "stop",
+                                    "restart", "uninstall"))
+    p.add_argument("--root", required=True, help="entity root directory")
+    p.add_argument("--name", default=None,
+                   help="service name (default: the root's basename "
+                        "→ anima-<name>.service)")
+    p.add_argument("--no-web", action="store_true",
+                   help="install without the Observatory web GUI "
+                        "(web is ON by default — it's the point)")
+    p.add_argument("--telegram", action="store_true",
+                   help="also attach the Telegram sense")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing unit file on install")
+    p.set_defaults(func=cmd_service)
 
     args = ap.parse_args(argv)
     return args.func(args)
