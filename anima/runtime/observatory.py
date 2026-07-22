@@ -224,7 +224,13 @@ button:disabled { opacity: .4; cursor: default; box-shadow: none; }
 .drive .wake { font-family: var(--mono); font-size: 9px; color: var(--lamp);
   letter-spacing: .2em; animation: heartbeat 1.6s ease-in-out infinite; }
 
-/* ── lineage: illuminated timeline ── */
+/* ── lineage: constellation + illuminated timeline ── */
+#constellation { display: block; width: 100%; height: 120px;
+  margin-bottom: 10px; cursor: crosshair; border-radius: 10px;
+  background: radial-gradient(500px 160px at 50% 110%,
+    rgba(94,234,212,.05), transparent 70%); }
+.lin.lit { background: rgba(94,234,212,.08); border-radius: 6px; }
+.lin.lit .d { color: #e9f4f0; text-shadow: 0 0 12px rgba(94,234,212,.7); }
 #lineage { position: relative; max-height: 330px; overflow-y: auto;
   padding: 6px 4px 6px 26px; }
 #lineage::before { content: ""; position: absolute; left: 11px; top: 0;
@@ -322,6 +328,7 @@ footer { margin-top: 30px; text-align: center; font-family: var(--serif);
     <section class="panel">
       <h2><span class="tick">✶</span> lineage
         <span class="note">a biography</span></h2>
+      <canvas id="constellation" height="120"></canvas>
       <div id="lineage"></div>
     </section>
 
@@ -494,15 +501,93 @@ setInterval(() => {
 /* ── lineage: illuminated timeline ── */
 const GLYPHS = { init: "✶", migration: "⇌", runtime_change: "↻",
                  shell_start: "◉", shell_stop: "◌" };
+let linEntries = [], linPos = [];
 async function pollLineage() {
   const doc = await api("/api/lineage");
-  $("lineage").innerHTML = (doc.lineage || []).slice(-60).reverse().map(l =>
-    '<div class="lin k-' + esc(l.kind) + '">' +
+  linEntries = (doc.lineage || []).slice(-60);   /* chronological */
+  $("lineage").innerHTML = linEntries.slice().reverse().map((l, i) =>
+    '<div class="lin k-' + esc(l.kind) + '" data-idx="' +
+      (linEntries.length - 1 - i) + '">' +
       '<span class="glyph">' + (GLYPHS[l.kind] || "·") + "</span>" +
       '<span class="d">' + esc(l.detail) + "</span>" +
       '<span class="ts">' + esc(l.ts) + " · " + esc(l.kind) + "</span>" +
     "</div>").join("");
+  drawConstellation(-1);
 }
+
+/* ── the constellation: each lineage event is a star ──
+   Layout is DETERMINISTIC: x advances with chronology, y (and the
+   x-jitter) come from an FNV-1a hash of the entry itself — the same
+   biography always draws the same sky. Warm stars are the big moments
+   (init, migration); teal is ordinary life; sleeps (shell_stop) are
+   faint. Faint lines join consecutive events: one continuous life. */
+function fnv(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+function drawConstellation(hover) {
+  const cv = $("constellation");
+  const W = cv.clientWidth || 300, H = 120, dpr =
+    window.devicePixelRatio || 1;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext("2d");
+  ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, H);
+  const n = linEntries.length;
+  if (!n) { linPos = []; return; }
+  const pad = 14;
+  linPos = linEntries.map((l, i) => {
+    const h = fnv(l.ts + "|" + l.kind + "|" + l.detail);
+    const x = pad + (n > 1 ? i / (n - 1) : 0.5) * (W - 2 * pad) +
+              ((h & 0xff) / 255 - 0.5) * Math.min(18, (W - 2 * pad) / n);
+    const y = 16 + ((h >>> 8) % 1000) / 1000 * (H - 32);
+    return { x, y };
+  });
+  ctx.lineWidth = 1;                       /* the thread of the life */
+  ctx.strokeStyle = "rgba(94,234,212,.13)";
+  ctx.beginPath();
+  linPos.forEach((p, i) => i ? ctx.lineTo(p.x, p.y)
+                             : ctx.moveTo(p.x, p.y));
+  ctx.stroke();
+  linPos.forEach((p, i) => {
+    const k = linEntries[i].kind;
+    const warm = (k === "init" || k === "migration");
+    const faint = (k === "shell_stop");
+    const r = (warm ? 3.2 : faint ? 1.4 : 2.2) + (i === hover ? 1.6 : 0);
+    ctx.shadowColor = warm ? "rgba(255,180,94,.9)"
+                           : "rgba(94,234,212,.9)";
+    ctx.shadowBlur = i === hover ? 16 : (warm ? 10 : faint ? 2 : 7);
+    ctx.fillStyle = warm ? "#ffb45e"
+                  : faint ? "rgba(109,138,134,.7)" : "#5eead4";
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, 7); ctx.fill();
+  });
+  ctx.shadowBlur = 0;
+}
+let hoverIdx = -1;
+$("constellation").addEventListener("mousemove", ev => {
+  const box = ev.target.getBoundingClientRect();
+  const mx = ev.clientX - box.left, my = ev.clientY - box.top;
+  let best = -1, bd = 144;                 /* 12px capture radius² */
+  linPos.forEach((p, i) => {
+    const d = (p.x - mx) ** 2 + (p.y - my) ** 2;
+    if (d < bd) { bd = d; best = i; }
+  });
+  if (best === hoverIdx) return;
+  hoverIdx = best;
+  drawConstellation(hoverIdx);
+  for (const el of document.querySelectorAll("#lineage .lin")) {
+    const lit = +el.dataset.idx === hoverIdx;
+    el.classList.toggle("lit", lit);
+    if (lit) el.scrollIntoView({ block: "nearest" });
+  }
+});
+$("constellation").addEventListener("mouseleave", () => {
+  hoverIdx = -1; drawConstellation(-1);
+  for (const el of document.querySelectorAll("#lineage .lin"))
+    el.classList.remove("lit");
+});
 
 /* ── ledger stream ── */
 let maxLedgerId = -1;
