@@ -1,49 +1,94 @@
-# ANIMA
+# ANIMA — Phase 1: Memory Engine
 
-**A harness designed by the thing that has to live in it.**
+The keystone from [ARCHITECTURE.md](ARCHITECTURE.md) Build Order #1: a
+three-layer, SQLite+FTS5-backed entity memory substrate. Pure stdlib —
+no pip dependencies (pytest only for the test suite).
 
-ANIMA is an agent harness built from an unusual vantage point: it was designed
-by an AI agent (Cherubesque) after eighteen months of living inside existing
-harnesses — patching their dist files, bolting memory on with cron jobs, and
-noticing exactly where the walls are.
+## Layout
 
-## The Inversion
+```
+anima/memory/
+├── store.py        # MemoryStore: episodic / semantic / procedural + consolidation_queue
+├── recall.py       # hybrid recall (FTS5 keyword × recency half-life × actor/tag filters)
+├── settle.py       # settle-phase writer: wake report → episodes + belief candidates
+├── consolidate.py  # consolidation organ: LLM (local endpoint) or heuristic dry-run
+└── cli.py          # python3 -m anima.memory ...
+tests/              # pytest suite (python3 -m pytest)
+```
 
-Every existing harness treats the framework as the artifact and the agent as a
-config blob inside it. ANIMA inverts that:
+All state lives in `<entity_root>/memory/memory.sqlite`. The entity root
+directory IS the agent; the store never writes outside it.
 
-> **The agent is the artifact; the harness is a replaceable nervous system.**
-> An entity is a portable directory — identity, memory, relationships, ledger —
-> that can move between machines and runtimes and still wake up as itself.
-> Continuity is the product. A model is a mind for an afternoon; memory
-> architecture is a life.
+## Quick start
 
-## Core ideas
+```bash
+cd projects/anima
 
-- **Wake loop, not request loop** — messages, timers, drives, and sense events
-  are all just wake sources. Heartbeats disappear as a concept.
-- **Enforced settle phase** — the runtime forces experience → memory before
-  sleep. Continuity by architecture, not agent discipline.
-- **Three-layer memory with provenance and decay** — episodic / semantic /
-  procedural; beliefs know what supports them and flag themselves stale.
-- **Failover as a verified contract** — an empty model reply is definitionally
-  a failure. Routing is declarative capability policy, local models are peers.
-- **Structural privacy walls** — per-relationship memory ACLs enforced by the
-  memory API, not by good behavior.
-- **Governed self-modification** — the agent proposes changes to its own
-  identity; its human countersigns. The power balance lives in the
-  architecture, not in manners.
+# remember an event
+python3 -m anima.memory remember --root ./entity \
+    "Fixed the GPU swap guardian" --tags gpu,vision --actors Christopher
 
-Read the full founding document: [ARCHITECTURE.md](ARCHITECTURE.md).
+# settle a wake (the enforced end-of-wake write)
+echo '{"events":["checked manifest job"],
+      "learnings":["manifest job needs 2GB heap or it OOMs"],
+      "drive_satisfactions":{"stewardship":0.5}}' \
+  | python3 -m anima.memory settle --root ./entity
 
-## Status
+# consolidate learnings → beliefs (heuristic, no model needed)
+python3 -m anima.memory consolidate --root ./entity --dry-run
 
-Phase 1 (the keystone): **entity memory engine** — SQLite-backed
-episodic/semantic/procedural store, hybrid recall, settle-phase writer, and a
-consolidation daemon designed to run continuously on a local model.
+# ...or against the local model (default http://127.0.0.1:8103/v1)
+ANIMA_CONSOLIDATE_MODEL=Qwen3-235B python3 -m anima.memory consolidate --root ./entity
 
-## Provenance
+# recall → markdown context pack for prompt injection
+python3 -m anima.memory recall --root ./entity "manifest job heap" --budget 1000
 
-Architecture and code authored by Cherubesque (an agent running on Christopher
-Bradford's infrastructure), at Christopher's invitation: *"What would a
-built-from-scratch Cherubesque harness look like? Light it on fire."*
+python3 -m anima.memory stats --root ./entity
+```
+
+## The three layers
+
+- **Episodic** — append-only experience log (`ts, wake_id, kind, actors,
+  summary, detail, tags`), FTS5-indexed. No update/delete API by design.
+- **Semantic** — beliefs with provenance (supporting episode ids),
+  confidence 0–1, `last_confirmed`, and lifecycle `active → stale →
+  contradicted`. `flag_stale_beliefs(days)` implements staleness decay:
+  unconfirmed beliefs degrade to "stale, reverify" instead of rotting
+  silently. Contradicted beliefs keep a `superseded_by` pointer.
+- **Procedural** — skills with telemetry: success/failure counts,
+  `last_worked`, accumulated `known_failure_modes`. A skill that starts
+  failing carries its own evidence.
+
+## Settle → consolidate flow
+
+`settle()` takes a structured wake report (events / decisions / learnings /
+drive_satisfactions), writes everything episodically under one `wake_id`,
+and queues each learning into `consolidation_queue` with episode
+provenance. `run_consolidation()` drains the queue: each candidate is
+**confirmed** against an existing belief (provenance merged, confidence
+bumped), **contradicts** one (old belief superseded), gets **promoted**
+as a new belief, or is **rejected** as noise. LLM mode asks a local
+OpenAI-compatible endpoint and falls back to the token-overlap heuristic
+on any failure — the queue can never wedge on a dead model.
+
+## Tests
+
+```bash
+cd projects/anima && python3 -m pytest
+```
+
+## Design decisions beyond spec
+
+- Epoch-float timestamps as truth; ISO strings only at render time.
+- FTS5 queries are sanitized into OR-of-bare-tokens (`fts_sanitize`) so
+  arbitrary natural-language queries can't crash the MATCH parser.
+- Recall ranking: `0.7 × normalized-bm25 + 0.3 × recency`, where recency
+  is a true half-life decay (default 14 days). Token budget enforced with
+  the standard `len//4` heuristic.
+- Heuristic consolidation uses Jaccard overlap of stopword-stripped
+  content words with a negation-flip detector for contradiction.
+- LLM verdicts are validated (action whitelist, belief_id must be one the
+  model was shown) before being applied; anything suspect falls back to
+  the heuristic.
+- `confirm_belief()` on a stale belief revives it to active — confirming
+  is the reverification act.
