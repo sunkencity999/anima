@@ -7,6 +7,9 @@ dependencies (pytest only for the test suite).
   SQLite+FTS5 entity memory substrate.
 - **Phase 2 — wake scheduler** (Build Order #2): message/timer/drive/
   sense wake sources, priority dispatch, enforced settle, action ledger.
+- **Phase 3 — routing contract layer** (Build Order #3): declarative
+  model routing with failover as a *verified contract*. Standalone —
+  importable without the memory/wake packages.
 
 ## Layout
 
@@ -23,6 +26,13 @@ anima/wake/
 ├── orient.py       # orient-phase context pack (recall + intentions + drive pressure)
 ├── settle_guard.py # ENFORCED settle: handlers cannot skip settlement
 └── ledger.py       # append-only action ledger (§6) + audit stats
+anima/routing/
+├── policy.py       # capability tiers + ordered candidate chains + prefer_local_when
+├── contract.py     # response contract verifier (empty reply = ALWAYS a failure)
+├── classify.py     # provider error → retry_same / failover_next decision
+├── router.py       # chain walker: transport → classify/contract → audited result
+└── shim.py         # python3 -m anima.routing probe ... (CLI + harness-shim doc)
+examples/policy.example.json  # realistic chain: azure → azure → local 8103 → ollama
 tests/              # pytest suite (python3 -m pytest)
 demo.py             # deterministic Phase 2 simulation (python3 demo.py)
 ```
@@ -188,3 +198,92 @@ totals — honest self-audit for free.
 - Scheduler logs `dispatch` and `settle` ledger entries around every
   wake when a ledger is attached, so auditability is structural even if
   the handler logs nothing.
+
+# Phase 3: Model Routing + Failover Contract (§3)
+
+## Why this layer exists
+
+Three real production bug classes (each cost a hand-applied dist patch on a
+live harness) are made *structurally impossible* here:
+
+1. **Empty reply marked success.** A harness classified empty payloads from
+   a candidate as success and terminated the fallback chain with nothing to
+   show. Here, `verify_response()` fails any response with no content and
+   no valid tool calls — **unconditionally**. `min_content_chars` is clamped
+   to ≥ 1 at both the policy and contract layer; there is no configuration
+   that permits an empty reply to pass. It's an invariant, not a setting.
+2. **Anthropic-shaped 400 bodies misclassified as retryable.** Error JSON
+   like `{"type":"error","error":{"type":"invalid_request_error",...}}` —
+   arriving *without* usable HTTP status context — was classified "unknown"
+   and retried on the same dead model until terminal failure. Here,
+   `classify_error(status, body)` parses OpenAI- and Anthropic-shaped bodies
+   (dict, string, even string with log-prefix junk) *before* consulting the
+   status code, and `status=None` classifies correctly.
+3. **DeploymentNotFound marked candidate_succeeded.** A hard "this model
+   does not exist" was logged as success and the chain terminated. Here,
+   `DeploymentNotFound` / `model_not_found` / `not_found_error` map to
+   `failover_next` with a retry budget of **zero**, and unknown errors
+   default to *failover*, never to success and never to unbounded retries.
+
+## Quick start
+
+```bash
+# real probe through a chain (prints attempt audit)
+python3 -m anima.routing probe --policy examples/policy.example.json \
+    --tier standard --prompt "Say hello in five words."
+```
+
+```python
+from anima.routing import Router, RoutingPolicy, RoutingExhausted
+
+policy = RoutingPolicy.from_file("examples/policy.example.json")
+router = Router(policy)                      # optional: ledger=Ledger(root)
+try:
+    r = router.complete("standard", [{"role": "user", "content": "hi"}])
+    if r.degraded:                            # failover is first-class telemetry
+        print("served by fallback:", r.model_used, r.failover_events)
+except RoutingExhausted as e:
+    for a in e.attempts:                      # full audit, always
+        print(a.candidate, a.outcome, a.reason)
+```
+
+## How a request flows
+
+```
+Router.complete(tier, messages)
+  └─ for each candidate (policy order, prefer_local_when applied):
+       transport call
+         ├─ error → classify_error(status, body)
+         │           ├─ retry_same    → jittered exp backoff, bounded by
+         │           │                  tier budget (auth clamps to 1)
+         │           └─ failover_next → next candidate + failover event
+         └─ 200   → verify_response(content, tool_calls, finish_reason, body)
+                     ├─ ok   → RoutedResult   ← the ONLY chain exit
+                     └─ fail → failover_next (contract failures are never
+                                retried on the same candidate)
+  all candidates spent → RoutingExhausted(attempts=[full audit])
+```
+
+## Phase 3 design decisions beyond spec
+
+- **Contract failures never retry the same candidate.** Same prompt + same
+  model ≈ same hole; retry budget is reserved for *transient transport*
+  errors (429/5xx/timeout). This also bounds worst-case chain latency.
+- **Body rules outrank status codes** in the classifier — the status may be
+  missing or lying (429 carrying `insufficient_quota` is billing/failover,
+  not rate-limit/retry).
+- **Unknown → failover_next**, the safe direction: never success, never an
+  infinite same-model retry loop, chain keeps moving toward local models
+  that are the most likely to be alive.
+- **Billing errors fail over, they don't abort** — one provider being out
+  of money says nothing about the next candidate. Abort exists only as the
+  end-of-chain `RoutingExhausted`.
+- **Standalone by construction:** `anima/routing` imports nothing from
+  `anima.memory`/`anima.wake` (a subprocess test enforces this). The ledger
+  is duck-typed: anything with `.log(wake_id, kind, detail, ...)` works,
+  and ledger failures can never take down routing.
+- **Everything injectable:** transport, sleep, clock, rng. The whole test
+  suite is offline and deterministic; the default urllib transport is only
+  exercised by the CLI probe.
+- See `anima/routing/shim.py`'s docstring for wrapping an *existing*
+  harness's model call path with this layer as a verification shim.

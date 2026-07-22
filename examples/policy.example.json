@@ -1,0 +1,153 @@
+{
+  "prefer_local_when": {
+    "tiers": ["reflex"]
+  },
+  "defaults": {
+    "max_retries_same": 2,
+    "backoff_base_s": 0.5,
+    "min_content_chars": 1
+  },
+  "tiers": {
+    "reflex": {
+      "candidates": [
+        {
+          "provider": "azure-anthropic-bradford",
+          "model": "claude-fable-5",
+          "base_url": "https://infraaikey-bradford.services.ai.azure.com/openai/v1",
+          "api_key_env": "AZURE_ANTHROPIC_KEY",
+          "max_tokens": 1024,
+          "timeout_s": 60,
+          "cost_tier": "frontier",
+          "local": false
+        },
+        {
+          "provider": "devbox2-local",
+          "model": "Qwen3-235B-A22B-Instruct-2507",
+          "base_url": "http://127.0.0.1:8103/v1",
+          "max_tokens": 1024,
+          "timeout_s": 60,
+          "cost_tier": "free",
+          "local": true
+        },
+        {
+          "provider": "ollama",
+          "model": "ornith:35b",
+          "base_url": "http://127.0.0.1:11434/v1",
+          "max_tokens": 1024,
+          "timeout_s": 60,
+          "cost_tier": "free",
+          "local": true
+        }
+      ]
+    },
+    "standard": {
+      "candidates": [
+        {
+          "provider": "azure-anthropic-bradford",
+          "model": "claude-fable-5",
+          "base_url": "https://infraaikey-bradford.services.ai.azure.com/openai/v1",
+          "api_key_env": "AZURE_ANTHROPIC_KEY",
+          "max_tokens": 4096,
+          "timeout_s": 120,
+          "cost_tier": "frontier",
+          "local": false
+        },
+        {
+          "provider": "azure-openai",
+          "model": "gpt-5.2",
+          "base_url": "https://infraaikey-bradford.openai.azure.com/openai/v1",
+          "api_key_env": "AZURE_OPENAI_KEY",
+          "max_tokens": 4096,
+          "timeout_s": 120,
+          "cost_tier": "frontier",
+          "local": false
+        },
+        {
+          "provider": "devbox2-local",
+          "model": "Qwen3-235B-A22B-Instruct-2507",
+          "base_url": "http://127.0.0.1:8103/v1",
+          "max_tokens": 4096,
+          "timeout_s": 180,
+          "cost_tier": "free",
+          "local": true
+        },
+        {
+          "provider": "ollama",
+          "model": "ornith:35b",
+          "base_url": "http://127.0.0.1:11434/v1",
+          "max_tokens": 4096,
+          "timeout_s": 180,
+          "cost_tier": "free",
+          "local": true
+        }
+      ]
+    },
+    "deep": {
+      "max_retries_same": 3,
+      "candidates": [
+        {
+          "provider": "azure-anthropic-bradford",
+          "model": "claude-opus-4-8-Bradford",
+          "base_url": "https://infraaikey-bradford.services.ai.azure.com/openai/v1",
+          "api_key_env": "AZURE_ANTHROPIC_KEY",
+          "max_tokens": 16384,
+          "timeout_s": 300,
+          "cost_tier": "frontier",
+          "local": false
+        },
+        {
+          "provider": "azure-openai",
+          "model": "gpt-5.2",
+          "base_url": "https://infraaikey-bradford.openai.azure.com/openai/v1",
+          "api_key_env": "AZURE_OPENAI_KEY",
+          "max_tokens": 16384,
+          "timeout_s": 300,
+          "cost_tier": "frontier",
+          "local": false
+        },
+        {
+          "provider": "devbox2-local",
+          "model": "Qwen3-235B-A22B-Instruct-2507",
+          "base_url": "http://127.0.0.1:8103/v1",
+          "max_tokens": 8192,
+          "timeout_s": 600,
+          "cost_tier": "free",
+          "local": true
+        }
+      ]
+    },
+    "verified_code": {
+      "min_content_chars": 20,
+      "candidates": [
+        {
+          "provider": "azure-anthropic-bradford",
+          "model": "claude-opus-4-8-Bradford",
+          "base_url": "https://infraaikey-bradford.services.ai.azure.com/openai/v1",
+          "api_key_env": "AZURE_ANTHROPIC_KEY",
+          "max_tokens": 16384,
+          "timeout_s": 300,
+          "cost_tier": "frontier",
+          "local": false
+        },
+        {
+          "provider": "devbox2-local",
+          "model": "Qwen3-235B-A22B-Instruct-2507",
+          "base_url": "http://127.0.0.1:8103/v1",
+          "max_tokens": 8192,
+          "timeout_s": 600,
+          "cost_tier": "free",
+          "local": true
+        },
+        {
+          "provider": "ollama",
+          "model": "ornith:35b",
+          "base_url": "http://127.0.0.1:11434/v1",
+          "max_tokens": 8192,
+          "timeout_s": 600,
+          "cost_tier": "free",
+          "local": true
+        }
+      ]
+    }
+  }
+}
