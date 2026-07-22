@@ -277,6 +277,20 @@ button:disabled { opacity: .4; cursor: default; box-shadow: none; }
 #memresults .hit .meta { font-family: var(--mono); font-size: 10px;
   color: var(--ink-faint); margin-top: 3px; }
 
+/* ── presence ──
+   #iris: the dome opens on arrival — a JS-lerped radial aperture.
+   body.adrift: the live stream is down; the room dims gently until
+   the connection (or polling) restores the light. */
+#iris { position: fixed; inset: 0; z-index: 60; pointer-events: none;
+  background: radial-gradient(circle at 50% 42%,
+    transparent var(--iris, 0%),
+    var(--abyss) calc(var(--iris, 0%) + 16%)); }
+body.adrift .wrap { filter: brightness(.7) saturate(.75);
+  transition: filter 2.5s ease; }
+body:not(.adrift) .wrap { transition: filter 1.2s ease; }
+body.adrift .pill .dot { background: var(--ink-faint); box-shadow: none;
+  animation: none; }
+
 footer { margin-top: 30px; text-align: center; font-family: var(--serif);
   font-style: italic; font-size: 11px; color: var(--ink-faint);
   letter-spacing: .18em; }
@@ -290,6 +304,7 @@ footer { margin-top: 30px; text-align: center; font-family: var(--serif);
 </style>
 </head>
 <body>
+<div id="iris"></div>
 <div class="wrap">
   <header>
     <h1><span class="dome">◉</span> __NAME__</h1>
@@ -652,7 +667,8 @@ function connectStream() {
   if (!window.EventSource) return;         /* ancient browser → polling */
   try { es = new EventSource("/api/stream"); } catch (e) { return; }
   let opened = false;
-  es.onopen = () => { opened = true; sseLive = true; sseRetryMs = 3000; };
+  es.onopen = () => { opened = true; sseLive = true; sseRetryMs = 3000;
+                      setAdrift(false); };
   es.addEventListener("ledger", ev => {
     const doc = JSON.parse(ev.data);
     renderLedger(doc, !(doc.fresh_ids || []).length);
@@ -666,12 +682,32 @@ function connectStream() {
   es.addEventListener("replies", ev => renderReplies(JSON.parse(ev.data)));
   es.onerror = () => {                     /* fall back to polling */
     sseLive = false;
+    setAdrift(true);
     try { es.close(); } catch (e) {}
     es = null;
     sseRetryMs = Math.min(sseRetryMs * 2, 60000);
     setTimeout(connectStream, sseRetryMs);
   };
 }
+
+/* ── presence ── */
+function setAdrift(on) {
+  document.body.classList.toggle("adrift", on);
+  if (on) $("locktext").textContent = "adrift · the window looks back";
+}
+function openIris() {                      /* the dome opens on arrival */
+  const el = $("iris");
+  let r = 0;
+  const t0 = performance.now(), dur = 1600;
+  (function step(t) {
+    const k = Math.min(1, (t - t0) / dur);
+    r = 140 * (1 - Math.pow(1 - k, 3));    /* ease-out cubic */
+    el.style.setProperty("--iris", r.toFixed(1) + "%");
+    if (k < 1) requestAnimationFrame(step);
+    else el.remove();
+  })(t0);
+}
+openIris();
 
 /* ── main loop ── */
 let firstPaint = true;
