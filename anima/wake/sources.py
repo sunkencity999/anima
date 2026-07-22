@@ -165,6 +165,19 @@ CREATE TABLE IF NOT EXISTS drive_state (
     pending    INTEGER NOT NULL DEFAULT 0,
     total_wakes INTEGER NOT NULL DEFAULT 0
 );
+
+-- Drive pressure history (Observatory v3 time travel): pressure between
+-- events is deterministic (rate_per_hour × elapsed), so only the
+-- discrete events need recording — first sighting, threshold crossing,
+-- satisfaction. Past pressure reconstructs from the nearest anchor.
+CREATE TABLE IF NOT EXISTS drive_events (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    name     TEXT NOT NULL,
+    ts       REAL NOT NULL,
+    pressure REAL NOT NULL,
+    kind     TEXT NOT NULL               -- seed | wake | satisfy
+);
+CREATE INDEX IF NOT EXISTS idx_drive_events ON drive_events(name, ts);
 """
 
 
@@ -320,9 +333,17 @@ class DriveSource(WakeSource):
             self.db.execute(
                 "INSERT INTO drive_state (name, pressure, updated_ts)"
                 " VALUES (?, 0.0, ?)", (name, now))
+            self._record_event(name, now, 0.0, "seed")
             self.db.commit()
             row = self._row(name)
         return row  # type: ignore[return-value]
+
+    def _record_event(self, name: str, ts: float, pressure: float,
+                      kind: str) -> None:
+        """Append a drive-history anchor (commit rides the caller's)."""
+        self.db.execute(
+            "INSERT INTO drive_events (name, ts, pressure, kind)"
+            " VALUES (?,?,?,?)", (name, ts, pressure, kind))
 
     def _accumulate(self, name: str, now: float) -> sqlite3.Row:
         cfg = self.drives[name]
@@ -343,6 +364,7 @@ class DriveSource(WakeSource):
                 self.db.execute(
                     "UPDATE drive_state SET pending=1,"
                     " total_wakes=total_wakes+1 WHERE name=?", (name,))
+                self._record_event(name, now, row["pressure"], "wake")
                 self.db.commit()
                 wakes.append(Wake(
                     wake_id=_new_wake_id("drive"),
@@ -372,6 +394,8 @@ class DriveSource(WakeSource):
             "UPDATE drive_state SET pressure=?, pending=?, updated_ts=?"
             " WHERE name=?",
             (new_pressure, pending, now if now else row["updated_ts"], name))
+        self._record_event(name, now if now else row["updated_ts"],
+                           new_pressure, "satisfy")
         self.db.commit()
         return new_pressure
 
@@ -389,5 +413,40 @@ class DriveSource(WakeSource):
                 "pending": bool(row["pending"]),
                 "total_wakes": row["total_wakes"],
                 "description": cfg["description"],
+            })
+        return out
+
+    def history_summary(self, until: float) -> list[dict]:
+        """Reconstructed pressure per drive as of a PAST moment —
+        read-only (never touches drive_state, never mutates anything).
+
+        Anchored on the most recent recorded drive event (seed / wake /
+        satisfy) at or before `until`; pressure grows from that anchor
+        at rate_per_hour, exactly the live accumulation model. Times
+        before a drive existed (or entities predating the drive_events
+        table) report pressure 0 with known=False."""
+        out = []
+        for name, cfg in self.drives.items():
+            row = self.db.execute(
+                "SELECT ts, pressure FROM drive_events"
+                " WHERE name=? AND ts<=?"
+                " ORDER BY ts DESC, id DESC LIMIT 1",
+                (name, until)).fetchone()
+            if row is None:
+                pressure, known = 0.0, False
+            else:
+                elapsed_h = max(0.0, (until - row["ts"]) / 3600.0)
+                pressure = row["pressure"] + cfg["rate_per_hour"] * elapsed_h
+                known = True
+            out.append({
+                "name": name,
+                "pressure": pressure,
+                "threshold": cfg["threshold"],
+                "fraction": (pressure / cfg["threshold"])
+                            if cfg["threshold"] else 0.0,
+                "pending": False,
+                "description": cfg["description"],
+                "reconstructed": True,
+                "known": known,
             })
         return out

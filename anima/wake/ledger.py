@@ -109,6 +109,24 @@ class Ledger:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def window(self, until_ts: float, limit: int = 50) -> list[dict]:
+        """The `limit` most recent actions at or before `until_ts`,
+        newest-first — time travel reads (Observatory v3). Read-only,
+        windowed: the whole ledger never ships anywhere."""
+        rows = self.db.execute(
+            "SELECT * FROM actions WHERE ts <= ? ORDER BY id DESC LIMIT ?",
+            (until_ts, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def bounds(self) -> dict:
+        """Timeline extent: oldest/newest action ts + row count."""
+        row = self.db.execute(
+            "SELECT MIN(ts) AS oldest, MAX(ts) AS newest,"
+            " COUNT(*) AS actions FROM actions").fetchone()
+        return {"oldest": row["oldest"], "newest": row["newest"],
+                "actions": row["actions"] or 0}
+
     def stats(self) -> dict:
         """Audit rollups: actions per day, per wake source, per kind,
         plus token/cost totals."""
