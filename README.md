@@ -83,6 +83,44 @@ open*:
   the live stream drops, the room dims gently and the lock pill reads
   *adrift · the window looks back* until reconnection.
 
+### Observatory v3 (the conversation is the centerpiece)
+
+v3 reorganizes the page around the dialogue and makes the whole thing
+work from a phone:
+
+- **Conversation-primary layout** — the chat with the entity sits at
+  the center of a three-column grid, largest panel on the page; the
+  instruments arrange around it as the supporting observatory (drives
+  and lineage on the left rail, expressions / ledger / memory search
+  on the right). While the entity composes — a breathing amber
+  ellipsis in the chat — the memories it recalled for that turn
+  surface as **faint marginalia** beside the dialogue: `POST
+  /api/message` now returns the episode/belief snippets the orient
+  phase surfaces for the wake, through the same in-sqlite ACL wall as
+  `/api/memory/search` (other people's private rows are structurally
+  invisible). The notes settle dimmer once the reply lands.
+- **Time travel** — a scrub bar under the header maps the entity's
+  whole ledger history onto one slider. Dragging back fetches a
+  *window* of the past (`GET /api/history?until=<epoch>&limit=N` —
+  read-only, on demand; the full ledger never ships to the browser)
+  and re-renders the ledger, the drive gauges and the ambient mood as
+  they were at that moment. Drive pressures reconstruct from a small
+  `drive_events` anchor table (seed / wake / satisfy — pressure
+  between events is deterministic, so only the discrete events
+  persist); gauges from before a drive existed render as honest dim
+  ghosts. Viewing the past is unmistakable: the dome lamp goes cold
+  blue, the room desaturates, a *viewing the past* pill and a
+  *return to now* button appear. Live updates for the affected panels
+  stash while you're in the past and replay on return; the
+  conversation always stays live — the dialogue is the present.
+- **Mobile-worthy** — the layout collapses toward its own priorities:
+  a single-column stack with the conversation first, instrument
+  panels foldable by tapping their headers (ledger / lineage / memory
+  start folded on phones), 44px+ touch targets, 16px inputs (no iOS
+  zoom), no horizontal scroll, backdrop blur dropped on small screens
+  for GPU sanity, and `prefers-reduced-motion` respected throughout.
+  Checking on your entity from bed is a first-class use case.
+
 - **Auth**: hit any URL with `?token=<token>` once → HttpOnly cookie;
   every `/api/*` route requires cookie, bearer header, or query token.
 - **Config**: `senses/web.json` — `{"port": 8762, "bind": "0.0.0.0",
