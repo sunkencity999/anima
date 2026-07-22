@@ -370,16 +370,15 @@ $("chatform").addEventListener("submit", async ev => {
   } catch (e) { addMsg("observatory", "ent", "⚠ send failed: " + e.message); }
 });
 
-async function pollReplies() {
-  const doc = await api("/api/replies");
+function renderReplies(doc) {
   for (const r of (doc.replies || [])) addMsg(doc.entity || "entity", "ent", r.text);
 }
+async function pollReplies() { renderReplies(await api("/api/replies")); }
 
 /* ── the art wall ── */
 const seenExprs = new Set();
 let exprEmpty = true;
-async function pollExpressions() {
-  const doc = await api("/api/expressions?limit=20");
+function renderExpressions(doc, initial) {
   const items = (doc.expressions || []).slice().reverse(); // oldest first
   for (const x of items) {
     if (seenExprs.has(x.id)) continue;
@@ -397,17 +396,19 @@ async function pollExpressions() {
     card.appendChild(body); card.appendChild(cap);
     $("exprs").prepend(card);              /* newest surfaces on top */
     requestAnimationFrame(() => card.classList.add("shown"));
-    if (!firstPaint) {                     /* bloom only for live arrivals */
+    if (!initial) {                        /* bloom only for live arrivals */
       card.classList.add("fresh");
       setTimeout(() => card.classList.remove("fresh"), 6000);
     }
   }
 }
+async function pollExpressions() {
+  renderExpressions(await api("/api/expressions?limit=20"), firstPaint);
+}
 
 /* ── drives: breathing rings ── */
 const R = 40, CIRC = 2 * Math.PI * R;
-async function pollDrives() {
-  const doc = await api("/api/drives");
+function renderDrives(doc) {
   const ds = doc.drives || [];
   if (!ds.length) return;
   const box = $("drives"); box.innerHTML = "";
@@ -439,6 +440,7 @@ async function pollDrives() {
     });
   }
 }
+async function pollDrives() { renderDrives(await api("/api/drives")); }
 
 /* ── lineage: illuminated timeline ── */
 const GLYPHS = { init: "✶", migration: "⇌", runtime_change: "↻",
@@ -455,22 +457,23 @@ async function pollLineage() {
 
 /* ── ledger stream ── */
 let maxLedgerId = -1;
-async function pollLedger() {
-  const doc = await api("/api/ledger?limit=50");
+function renderLedger(doc, initial) {
   const rows = doc.actions || [];
   const newest = rows.length ? rows[0].id : -1;
   $("ledger").innerHTML = rows.map(a =>
     '<div class="ln' +
-    (!firstPaint && a.id > maxLedgerId ? " fresh" : "") + '">' +
+    (!initial && a.id > maxLedgerId ? " fresh" : "") + '">' +
     '<span class="ts">' + esc(fmtTs(a.ts)) + "</span> " +
     '<span class="' + (a.outcome === "ok" ? "k" : "e") + '">' +
     esc(a.kind) + "</span> <b>" + esc(a.detail) + "</b></div>").join("");
   maxLedgerId = Math.max(maxLedgerId, newest);
 }
+async function pollLedger() {
+  renderLedger(await api("/api/ledger?limit=50"), firstPaint);
+}
 
 /* ── stats / lock ── */
-async function pollStats() {
-  const doc = await api("/api/stats");
+function renderStats(doc) {
   const m = (doc.memory || {});
   $("statpill").textContent =
     "episodes " + (m.episodes ?? "—") +
@@ -480,6 +483,7 @@ async function pollStats() {
   $("locktext").textContent = doc.lock || "live";
   document.title = (doc.name || "anima") + " — Observatory";
 }
+async function pollStats() { renderStats(await api("/api/stats")); }
 
 /* ── memory search ── */
 $("memform").addEventListener("submit", async ev => {
@@ -505,15 +509,48 @@ $("memform").addEventListener("submit", async ev => {
   } catch (e) { box.innerHTML = '<div class="empty">search failed.</div>'; }
 });
 
+/* ── live stream (SSE) with graceful fallback to polling ──
+   The dome prefers a single held-open /api/stream connection; if it
+   drops (server restart, network), polling resumes on the next tick
+   and we retry the stream with a gentle backoff. */
+let sseLive = false, sseRetryMs = 3000, es = null;
+function connectStream() {
+  if (!window.EventSource) return;         /* ancient browser → polling */
+  try { es = new EventSource("/api/stream"); } catch (e) { return; }
+  let opened = false;
+  es.onopen = () => { opened = true; sseLive = true; sseRetryMs = 3000; };
+  es.addEventListener("ledger", ev => {
+    const doc = JSON.parse(ev.data);
+    renderLedger(doc, !(doc.fresh_ids || []).length);
+  });
+  es.addEventListener("expressions", ev => {
+    const doc = JSON.parse(ev.data);
+    renderExpressions(doc, !!doc.initial);
+  });
+  es.addEventListener("drives", ev => renderDrives(JSON.parse(ev.data)));
+  es.addEventListener("stats", ev => renderStats(JSON.parse(ev.data)));
+  es.addEventListener("replies", ev => renderReplies(JSON.parse(ev.data)));
+  es.onerror = () => {                     /* fall back to polling */
+    sseLive = false;
+    try { es.close(); } catch (e) {}
+    es = null;
+    sseRetryMs = Math.min(sseRetryMs * 2, 60000);
+    setTimeout(connectStream, sseRetryMs);
+  };
+}
+
 /* ── main loop ── */
 let firstPaint = true;
 async function tick() {
-  await Promise.allSettled([pollReplies(), pollExpressions(), pollDrives(),
-                            pollLedger(), pollStats()]);
+  if (!sseLive) {
+    await Promise.allSettled([pollReplies(), pollExpressions(),
+                              pollDrives(), pollLedger(), pollStats()]);
+  }
   firstPaint = false;
 }
 pollLineage(); setInterval(pollLineage, 30000);
 tick(); setInterval(tick, 3000);
+connectStream();
 </script>
 </body>
 </html>

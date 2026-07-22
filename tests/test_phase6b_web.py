@@ -242,3 +242,54 @@ class TestPanels:
         _, sense = shell_and_sense
         status, _, _ = call(sense, "GET", "/api/nope")
         assert status == 404
+
+
+class TestStream:
+    """SSE /api/stream: auth gate + event framing."""
+
+    def test_stream_requires_auth(self, shell_and_sense):
+        _, sense = shell_and_sense
+        status, doc, _ = call(sense, "GET", "/api/stream", token="wrong")
+        assert status == 401 and doc["error"] == "unauthorized"
+
+    def test_stream_emits_named_events(self, tmp_path):
+        shell = RuntimeShell(str(tmp_path / "sse"), clock=lambda: T0)
+        sense = WebSense({"port": 0, "token": TOKEN,
+                          "operator_person": "christopher",
+                          "stream_poll_s": 0.05,
+                          "stream_heartbeat_s": 0.1})
+        shell.add_sense("web", sense)
+        shell.start()
+        try:
+            sense.deliver("the dome hums", None)
+            url = f"http://127.0.0.1:{sense.port}/api/stream"
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", f"Bearer {TOKEN}")
+            buf = b""
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                assert resp.status == 200
+                assert resp.headers["Content-Type"].startswith(
+                    "text/event-stream")
+                import time as _t
+                deadline = _t.time() + 8
+                while _t.time() < deadline:
+                    buf += resp.read(1024)
+                    if (b"event: ledger" in buf
+                            and b"event: stats" in buf
+                            and b"event: replies" in buf
+                            and b": beat" in buf):
+                        break
+            text = buf.decode()
+            assert "event: ledger\ndata: " in text
+            assert "event: stats\ndata: " in text
+            assert "event: expressions\ndata: " in text
+            assert "event: replies\ndata: " in text
+            assert ": beat" in text            # heartbeat comment
+            # frames are well-formed: data line parses as JSON
+            for block in text.split("\n\n"):
+                if block.startswith("event: "):
+                    data = [ln for ln in block.split("\n")
+                            if ln.startswith("data: ")][0]
+                    json.loads(data[len("data: "):])
+        finally:
+            shell.shutdown()

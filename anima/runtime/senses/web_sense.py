@@ -30,6 +30,10 @@ Endpoints:
     GET  /api/expressions?limit=20 → expression cards (re-sanitized at
          serve time: defense in depth)
     GET  /api/stats           → entity stats + lock/uptime
+    GET  /api/stream          → Server-Sent Events: pushes ledger /
+         expressions / drives / stats / replies deltas as named SSE
+         events, with `: beat` comment heartbeats (~15s). The page
+         prefers this and falls back to polling if the stream drops.
 
 Threading: handlers run on HTTP threads but every touch of the entity's
 organs happens under the shell's dispatch lock — the single-writer
@@ -76,6 +80,10 @@ class WebSense:
         self.port = int(config.get("port", DEFAULT_PORT))
         self.bind = str(config.get("bind", "127.0.0.1"))
         self.operator = str(config.get("operator_person") or "operator")
+        # SSE tunables (overridable in config; tests shrink them)
+        self.stream_poll_s = float(config.get("stream_poll_s", 2.0))
+        self.stream_heartbeat_s = float(
+            config.get("stream_heartbeat_s", 15.0))
         self.shell: Any = None
         self.server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -177,6 +185,9 @@ class WebSense:
                 if not authed:
                     return self._json(401, {"error": "unauthorized"})
 
+                if path == "/api/stream":
+                    return self._stream(fresh)
+
                 try:
                     return self._api_get(path, query, fresh)
                 except Exception as exc:  # a broken panel ≠ a dead dome
@@ -253,6 +264,107 @@ class WebSense:
                     return self._json(200, stats)
 
                 return self._json(404, {"error": "unknown endpoint"})
+
+            # ── SSE stream ───────────────────────────────────────────
+            def _stream(self, fresh: bool) -> None:
+                """Server-Sent Events. Named events per panel; only
+                deltas after the initial snapshot. Pure stdlib: chunked
+                writes on the handler socket, no Content-Length."""
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Accel-Buffering", "no")
+                if fresh:
+                    self.send_header(
+                        "Set-Cookie",
+                        f"{_COOKIE}={sense.token}; HttpOnly; "
+                        f"SameSite=Strict; Path=/")
+                self.end_headers()
+
+                def emit(event: str, doc: dict) -> None:
+                    frame = (f"event: {event}\n"
+                             f"data: {json.dumps(doc)}\n\n")
+                    self.wfile.write(frame.encode("utf-8"))
+                    self.wfile.flush()
+
+                entity = sense.shell.entity
+                last_ledger_id = -1
+                last_drives = last_stats = None
+                seen_expr: set = set()
+                last_beat = time.time()
+                first = True
+                try:
+                    while sense.server is not None:
+                        # ledger (rows newest-first; "fresh" = new ids)
+                        rows = sense._locked(entity.ledger.recent, 50)
+                        fresh_ids = [r["id"] for r in rows
+                                     if r["id"] > last_ledger_id]
+                        if fresh_ids or first:
+                            if rows:
+                                last_ledger_id = max(
+                                    last_ledger_id,
+                                    max(r["id"] for r in rows))
+                            emit("ledger", {
+                                "actions": rows,
+                                "fresh_ids": [] if first else fresh_ids})
+
+                        # expressions (re-sanitized: defense in depth)
+                        xs = sense._locked(
+                            entity.store.recent_expressions, 20)
+                        new_x = [x for x in xs
+                                 if x["id"] not in seen_expr]
+                        if new_x or first:
+                            for x in xs:
+                                x["body"] = sanitize_fragment(x["body"])
+                            seen_expr.update(x["id"] for x in xs)
+                            emit("expressions", {"expressions": xs,
+                                                 "initial": first})
+
+                        # drives (only on change)
+                        drives = []
+                        if entity.drives is not None:
+                            drives = sense._locked(
+                                entity.drives.pressure_summary,
+                                sense.shell.clock())
+                        blob = json.dumps(drives, sort_keys=True)
+                        if blob != last_drives:
+                            last_drives = blob
+                            emit("drives", {"drives": drives})
+
+                        # stats (only on change; uptime churn excluded)
+                        stats = sense._locked(entity.stats)
+                        stats["name"] = sense._entity_name()
+                        blob = json.dumps(stats, sort_keys=True)
+                        if blob != last_stats:
+                            last_stats = blob
+                            up = (time.time() - sense._started_ts
+                                  if sense._started_ts else 0.0)
+                            stats["uptime_s"] = round(up, 1)
+                            stats["lock"] = (
+                                f"live · pid {os.getpid()} · up "
+                                f"{_fmt_uptime(up)}")
+                            emit("stats", stats)
+
+                        # replies (drain — mirrors /api/replies)
+                        with sense._replies_lock:
+                            out, sense._replies = sense._replies, []
+                        if out:
+                            emit("replies", {
+                                "replies": out,
+                                "entity": sense._entity_name()})
+
+                        first = False
+                        now = time.time()
+                        if now - last_beat >= sense.stream_heartbeat_s:
+                            self.wfile.write(b": beat\n\n")
+                            self.wfile.flush()
+                            last_beat = now
+                        time.sleep(sense.stream_poll_s)
+                except (BrokenPipeError, ConnectionResetError,
+                        OSError, AttributeError):
+                    # window closed, or the shell shut down under us
+                    return
 
             # ── POST ─────────────────────────────────────────────────
             def do_POST(self):  # noqa: N802
