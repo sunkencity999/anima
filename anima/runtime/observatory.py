@@ -241,6 +241,10 @@ header .spacer { flex: 1; }
 .msg.thinking .dots i:nth-child(3) { animation-delay: .44s; }
 @keyframes thinkp { 0%,100% { opacity: .2; transform: translateY(0); }
   50% { opacity: 1; transform: translateY(-2px); } }
+/* honest dots: past the staleness horizon (or across a restart) the
+   ellipsis becomes words — quieter than the dots, but true. */
+.msg.thinking .honest { font-style: italic; font-size: 12px;
+  color: var(--ink-faint); letter-spacing: .02em; }
 .msg { max-width: 88%; padding: 9px 13px; border-radius: 12px; font-size: 14px;
   line-height: 1.5; white-space: pre-wrap; word-break: break-word;
   animation: surface .5s cubic-bezier(.22,1,.36,1) both; }
@@ -677,6 +681,7 @@ async function api(path, opts) {
 }
 
 /* ── chat ── */
+const THINK_STALE_S = __STALE_S__;   /* server-config: typing_stale_s */
 let chatEmpty = true;
 function addMsg(who, cls, text) {
   if (chatEmpty) { $("chatlog").innerHTML = ""; chatEmpty = false; }
@@ -687,7 +692,19 @@ function addMsg(who, cls, text) {
   $("chatlog").scrollTop = $("chatlog").scrollHeight;
 }
 /* composing indicator: a breathing amber ellipsis while the entity
-   is somewhere between hearing and answering */
+   is somewhere between hearing and answering.
+   Honesty rules (2026-08-05, the restart that ate a message):
+   — past THINK_STALE_S the dots become "still thinking… (Ns)";
+   — if boot_id changes while a wait is in flight, the entity died
+     and came back: say so (the message replays at boot), keep
+     listening. Dots are never allowed to be silent lies. */
+let bootId = null, thinkT0 = null, thinkTimer = null,
+    thinkRestarted = false;
+function thinkBody(html) {
+  const el = $("thinkmsg");
+  if (el) el.innerHTML =
+    '<span class="who">' + esc(ENT) + "</span>" + html;
+}
 function addThinking() {
   removeThinking();
   if (chatEmpty) { $("chatlog").innerHTML = ""; chatEmpty = false; }
@@ -697,10 +714,32 @@ function addThinking() {
     '<span class="dots"><i>●</i> <i>●</i> <i>●</i></span>';
   $("chatlog").appendChild(div);
   $("chatlog").scrollTop = $("chatlog").scrollHeight;
+  thinkT0 = Date.now(); thinkRestarted = false;
+  clearInterval(thinkTimer);
+  thinkTimer = setInterval(tickThinking, 1000);
+}
+function tickThinking() {
+  if (thinkT0 == null || thinkRestarted || !$("thinkmsg")) return;
+  const s = Math.round((Date.now() - thinkT0) / 1000);
+  if (s >= THINK_STALE_S)
+    thinkBody('<span class="honest">still thinking… (' + s + "s)</span>");
 }
 function removeThinking() {
   const el = $("thinkmsg");
   if (el) el.remove();
+  thinkT0 = null; thinkRestarted = false;
+  clearInterval(thinkTimer); thinkTimer = null;
+}
+function noteBoot(id) {
+  if (!id) return;
+  if (bootId === null) { bootId = id; return; }
+  if (id === bootId) return;
+  bootId = id;                 /* a different life is answering now */
+  if ($("thinkmsg") && !thinkRestarted) {
+    thinkRestarted = true;
+    thinkBody('<span class="honest">the entity restarted — your ' +
+              "message was re-queued; still listening…</span>");
+  }
 }
 
 $("chatform").addEventListener("submit", async ev => {
@@ -1161,6 +1200,7 @@ function returnToNow() {
 
 /* ── stats / lock ── */
 function renderStats(doc) {
+  noteBoot(doc.boot_id);
   const m = (doc.memory || {});
   $("statpill").textContent =
     "episodes " + (m.episodes ?? "—") +
@@ -1206,7 +1246,11 @@ function connectStream() {
   try { es = new EventSource("/api/stream"); } catch (e) { return; }
   let opened = false;
   es.onopen = () => { opened = true; sseLive = true; sseRetryMs = 3000;
-                      setAdrift(false); };
+                      setAdrift(false);
+                      /* reconcile: did a different life answer? */
+                      pollStats().catch(() => {}); };
+  es.addEventListener("hello", ev =>
+    noteBoot((JSON.parse(ev.data) || {}).boot_id));
   es.addEventListener("ledger", ev => {
     const doc = JSON.parse(ev.data);
     liveLedger(doc, !(doc.fresh_ids || []).length);
@@ -1910,7 +1954,8 @@ def render_sky_page(title: str) -> str:
     return SKY_TEMPLATE.replace("__TITLE__", safe)
 
 
-def render_page(entity_name: str) -> str:
+def render_page(entity_name: str, *,
+                typing_stale_s: float = 120.0) -> str:
     """Fill the page template. (No str.format — the CSS is full of
     braces; a plain marker replace is the honest tool here.)"""
     safe = (entity_name or "anima").replace("<", "").replace(">", "")
@@ -1918,4 +1963,10 @@ def render_page(entity_name: str) -> str:
     # quote/backslash so a hostile directory name can't escape it.
     safe = (safe.replace("\\", "").replace('"', "").replace("'", "")
             .replace("`", ""))
-    return PAGE_TEMPLATE.replace("__NAME__", safe)
+    try:
+        stale = max(5.0, float(typing_stale_s))
+    except (TypeError, ValueError):
+        stale = 120.0
+    return (PAGE_TEMPLATE
+            .replace("__NAME__", safe)
+            .replace("__STALE_S__", f"{stale:g}"))

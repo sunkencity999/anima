@@ -222,6 +222,10 @@ class WebSense:
         self.stream_poll_s = float(config.get("stream_poll_s", 2.0))
         self.stream_heartbeat_s = float(
             config.get("stream_heartbeat_s", 15.0))
+        # Honest-dots staleness horizon: after this many seconds the
+        # page swaps the composing ellipsis for a visible elapsed
+        # counter — dots are never allowed to be silent lies.
+        self.typing_stale_s = float(config.get("typing_stale_s", 120.0))
         self.shell: Any = None
         self.server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -317,7 +321,8 @@ class WebSense:
                         return self._send(401,
                                           LOCK_PAGE.encode("utf-8"),
                                           "text/html; charset=utf-8")
-                    page = render_page(sense._entity_name())
+                    page = render_page(sense._entity_name(),
+                                       typing_stale_s=sense.typing_stale_s)
                     return self._send(200, page.encode("utf-8"),
                                       "text/html; charset=utf-8",
                                       set_cookie=fresh)
@@ -419,6 +424,12 @@ class WebSense:
                 if path == "/api/stats":
                     stats = sense._locked(entity.stats)
                     stats["name"] = sense._entity_name()
+                    # boot_id: which LIFE is answering. The page
+                    # compares it across polls — a change mid-wait
+                    # means the entity died and came back, and the
+                    # typing indicator owes the visitor the truth.
+                    stats["boot_id"] = getattr(sense.shell, "boot_id",
+                                               None)
                     up = (time.time() - sense._started_ts
                           if sense._started_ts else 0.0)
                     stats["uptime_s"] = round(up, 1)
@@ -630,6 +641,13 @@ class WebSense:
                     self.wfile.write(frame.encode("utf-8"))
                     self.wfile.flush()
 
+                # First frame is always hello: which life this stream
+                # belongs to. On reconnect the page compares boot_id
+                # and, if it changed while dots were showing, says so.
+                emit("hello", {"boot_id": getattr(sense.shell, "boot_id",
+                                                  None),
+                               "entity": sense._entity_name()})
+
                 entity = sense.shell.entity
                 last_ledger_id = -1
                 last_drives = last_stats = None
@@ -680,6 +698,8 @@ class WebSense:
                         blob = json.dumps(stats, sort_keys=True)
                         if blob != last_stats:
                             last_stats = blob
+                            stats["boot_id"] = getattr(
+                                sense.shell, "boot_id", None)
                             up = (time.time() - sense._started_ts
                                   if sense._started_ts else 0.0)
                             stats["uptime_s"] = round(up, 1)
