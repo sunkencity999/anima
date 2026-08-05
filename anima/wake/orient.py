@@ -78,6 +78,14 @@ def orient(
     coalesced = (wake.payload or {}).get("coalesced_count")
     if coalesced:
         lines.append(f"- coalesced: {coalesced} additional wake(s) merged in")
+    if (wake.payload or {}).get("replayed"):
+        note = ("- note: this wake was REPLAYED after a runtime restart — "
+                "the message arrived before the previous process died")
+        if (wake.payload or {}).get("maybe_retry"):
+            note += ("; the previous life may have started (even finished) "
+                     "answering it, so this could be a retry — avoid "
+                     "double-acting on anything with side effects")
+        lines.append(note)
     payload_items = {
         k: v for k, v in (wake.payload or {}).items()
         if k not in ("coalesced",) and isinstance(v, (str, int, float, bool))

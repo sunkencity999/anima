@@ -110,6 +110,17 @@ class WakeScheduler:
                             source=wake.source, ts=now)
         result = run_settled(self.store, self.handler, wake, now=now)
         self.dispatched += 1
+        # Durability hand-back: a source that persists its wakes
+        # (MessageSource) learns the debt is paid — on the scheduler
+        # thread, inside the dispatch path, single-writer intact.
+        for source in self.sources:
+            if source.name == wake.source:
+                hook = getattr(source, "on_settled", None)
+                if callable(hook):
+                    try:
+                        hook(wake, now)
+                    except Exception:
+                        pass  # bookkeeping must not kill the loop
         if self.ledger is not None:
             self.ledger.log(
                 wake.wake_id, "settle",

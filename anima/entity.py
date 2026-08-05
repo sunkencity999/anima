@@ -77,7 +77,7 @@ class EntityRoot:
         self.ledger = Ledger(self.root)
         self.relationships = RelationshipStore(self.root, clock=clock)
 
-        self.messages = MessageSource()
+        self.messages = MessageSource(self.root)  # durable: replay-on-boot
         self.timers = TimerSource(self.root)
         self.senses = SenseSource()
         sources: List[Any] = [self.messages, self.timers, self.senses]
@@ -194,10 +194,10 @@ class EntityRoot:
         Default context: direct with the sender."""
         ctx = context or AccessContext.direct(
             sender_person, channel="chat")
-        wake = self.messages.inject(
+        self.messages.inject(
             sender_person, text,
-            channel=ctx.channel or "chat", ts=self.clock())
-        wake.payload["access_context"] = ctx.to_dict()
+            channel=ctx.channel or "chat", ts=self.clock(),
+            extra={"access_context": ctx.to_dict()})
         return self.scheduler.run_pending(now=self.clock())
 
     def recall(
@@ -242,6 +242,7 @@ class EntityRoot:
         self.store.close()
         self.ledger.close()
         self.relationships.close()
+        self.messages.close()
         self.timers.close()
         if self.drives is not None:
             self.drives.close()

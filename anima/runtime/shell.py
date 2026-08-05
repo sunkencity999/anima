@@ -9,6 +9,15 @@
   wakes → settle a "shutdown" episode → lineage log entry. The entity
   always knows it went to sleep; forgetting is impossible even across
   death.
+- UNgraceful death can no longer eat a message either (2026-08-05
+  incident: a wake acknowledged with a 202 died with the process and
+  nobody — not the entity, not the page, not the ledger — ever knew).
+  Injection persists message wakes; start() replays anything the last
+  life left unsettled, in arrival order, stale ones skipped with a
+  ledger receipt instead of fired days late.
+- Every process gets a boot_id (uuid4): the Observatory watches it to
+  tell "still composing" from "died and came back" — the typing
+  indicator is not allowed to lie.
 
 CLI:  python3 -m anima.runtime --root <entity_root> [--policy routing.json]
 """
@@ -27,6 +36,15 @@ from ..entity import EntityRoot
 from ..relationships import AccessContext
 from .agent_turn import attach_agent_turn
 from .tools import ToolRegistry, default_registry
+
+
+def _age_str(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f}m"
+    return f"{seconds / 3600:.1f}h"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -103,6 +121,7 @@ class RuntimeShell:
     ):
         self.clock = clock
         self.tick_s = tick_s
+        self.boot_id = uuid.uuid4().hex  # this life, distinguishable
         self.entity = EntityRoot(root, clock=clock, drives=drives)
         self._stop = threading.Event()
         # Dispatch serialization: senses inject from their own threads,
@@ -113,6 +132,8 @@ class RuntimeShell:
         self.started = False
 
         config = self._load_config()
+        self.replay_max_age_s = float(
+            config.get("wake_replay_max_age_s", 24 * 3600.0))
         if allow_shell is None:
             allow_shell = bool(config.get("allow_shell", False))
         self.registry = registry or default_registry(allow_shell=allow_shell)
@@ -153,12 +174,17 @@ class RuntimeShell:
         """Sense adapters call this: message wake + AccessContext."""
         ctx = context or AccessContext.direct(
             str(sender), channel=via or "chat")
-        wake = self.entity.messages.inject(
-            str(sender), text, channel=ctx.channel or "chat",
-            ts=self.clock())
-        wake.payload["access_context"] = ctx.to_dict()
+        extra: Dict[str, Any] = {"access_context": ctx.to_dict()}
         if via:
-            wake.payload["via"] = via
+            extra["via"] = via
+        # The persist rides the inject (sources.py): serialize it the
+        # same way every other cross-thread organ touch is serialized —
+        # under the dispatch lock. Sense threads wait their turn;
+        # sqlite only ever sees one writer.
+        with self._dispatch_lock:
+            wake = self.entity.messages.inject(
+                str(sender), text, channel=ctx.channel or "chat",
+                ts=self.clock(), extra=extra)
         return wake
 
     def inject_event(self, kind: str, payload: Optional[dict] = None, *,
@@ -220,11 +246,38 @@ class RuntimeShell:
         self._lock.acquire()
         self.entity._append_lineage(
             "shell_start", f"runtime shell up (pid {os.getpid()})")
+        self._replay_unsettled()
         for sense in self._senses.values():
             start = getattr(sense, "start", None)
             if callable(start):
                 start(self)
         self.started = True
+
+    def _replay_unsettled(self) -> None:
+        """Resurrect message wakes the previous life never settled.
+        Runs before any sense starts: replayed debts are queued ahead
+        of whatever this life's visitors bring."""
+        now = self.clock()
+        with self._dispatch_lock:
+            replayed, skipped = self.entity.messages.replay_pending(
+                now, max_age_s=self.replay_max_age_s)
+            for row in skipped:
+                age_h = (now - row["created_ts"]) / 3600.0
+                self.entity.ledger.log(
+                    row["wake_id"], "replay_skipped",
+                    f"unsettled message from {row['sender']} was "
+                    f"{age_h:.1f}h old (> replay cap); marked stale, "
+                    "not fired", source="message", ts=now,
+                    outcome="skipped")
+            for wake in replayed:
+                self.entity.ledger.log(
+                    wake.wake_id, "replay",
+                    f"replaying unsettled message from "
+                    f"{wake.payload.get('sender', '?')} "
+                    f"(injected {_age_str(now - wake.ts)} ago"
+                    + (", died mid-turn: possible retry)"
+                       if wake.payload.get("maybe_retry") else ")"),
+                    source="message", ts=now)
 
     def stop(self) -> None:
         self._stop.set()

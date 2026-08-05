@@ -5,9 +5,16 @@ Design notes (beyond spec):
   clock and passes `now` in; sources never call time.time() themselves,
   so tests and the demo are fully deterministic.
 - TimerSource and DriveSource persist to <entity_root>/wake/wake.sqlite —
-  scheduled intentions and drive pressure survive restart. Message and
-  sense queues are deliberately ephemeral (a lost in-flight message is
-  the transport's problem to redeliver, not the scheduler's).
+  scheduled intentions and drive pressure survive restart. Sense queues
+  are deliberately ephemeral (ambient telemetry regenerates itself).
+  Message wakes USED to be ephemeral too, on the theory that a lost
+  in-flight message was the transport's problem to redeliver. Then a
+  live restart ate one (2026-08-05): the 202 had already been returned,
+  the transport had every reason to believe delivery was done, and the
+  wake died silently with the process. Now MessageSource persists every
+  injected message to the same wake.sqlite (pending → dispatched →
+  settled) and replays unsettled rows at boot — a message the entity
+  acknowledged is a debt, and debts survive death.
 - Recurring timers that fall behind (agent asleep past several periods)
   emit ONE catch-up wake and fast-forward next_ts past `now` — waking up
   to 40 stacked "hourly check" wakes helps nobody.
@@ -58,8 +65,8 @@ class Wake:
     def coalesce_with(self, other: "Wake") -> None:
         """Merge a newer wake of the same (source, key) into this one."""
         merged = self.payload.setdefault("coalesced", [])
-        merged.append({"reason": other.reason, "payload": other.payload,
-                       "ts": other.ts})
+        merged.append({"wake_id": other.wake_id, "reason": other.reason,
+                       "payload": other.payload, "ts": other.ts})
         self.priority = min(self.priority, other.priority)
         self.payload["coalesced_count"] = len(merged)
 
@@ -75,26 +82,61 @@ class WakeSource:
 
 # ── messages ──────────────────────────────────────────────────────────
 
+# A stale greeting firing days later is worse than an honest gap.
+REPLAY_MAX_AGE_S = 24 * 3600.0
+
+
 class MessageSource(WakeSource):
-    """Injectable message queue — chat adapters push, scheduler polls."""
+    """Injectable message queue — chat adapters push, scheduler polls.
+
+    With an entity_root, every injected message is also persisted to
+    wake.sqlite with a status lifecycle (pending → dispatched →
+    settled). The status writes ride the same threads the rest of the
+    wake store already trusts: inject may come from a sense thread
+    (the shell serializes it under the dispatch lock, exactly the
+    Phase 5 pattern the memory store uses); dispatch and settle marks
+    happen only on the scheduler thread. At boot, replay_pending()
+    resurrects anything unsettled — see the module docstring for the
+    incident that bought this.
+    """
 
     name = "message"
 
-    def __init__(self) -> None:
+    def __init__(self, entity_root: Optional[str] = None) -> None:
         self._queue: list[Wake] = []
+        self.db = _open_wake_db(entity_root) if entity_root else None
+
+    def close(self) -> None:
+        if self.db is not None:
+            self.db.close()
+            self.db = None
 
     def inject(self, sender: str, text: str, *, channel: str = "chat",
-               key: Optional[str] = None, ts: float = 0.0) -> Wake:
+               key: Optional[str] = None, ts: float = 0.0,
+               extra: Optional[dict] = None) -> Wake:
+        """Queue (and persist) a message wake. `extra` merges into the
+        payload BEFORE the persist so access context / via survive a
+        restart alongside the words themselves."""
+        payload = {"sender": sender, "text": text, "channel": channel}
+        if extra:
+            payload.update(extra)
         wake = Wake(
             wake_id=_new_wake_id("msg"),
             source="message",
             reason=f"message from {sender}",
-            payload={"sender": sender, "text": text, "channel": channel},
+            payload=payload,
             budget=dict(DEFAULT_BUDGET),
             priority=PRIORITY_MESSAGE,
             key=key or f"{channel}:{sender}",
             ts=ts,
         )
+        if self.db is not None:
+            self.db.execute(
+                "INSERT INTO message_wakes (wake_id, sender, text, payload,"
+                " created_ts, status) VALUES (?,?,?,?,?,'pending')",
+                (wake.wake_id, sender, text, json.dumps(payload),
+                 ts, ))
+            self.db.commit()
         self._queue.append(wake)
         return wake
 
@@ -103,7 +145,83 @@ class MessageSource(WakeSource):
         for w in out:
             if not w.ts:
                 w.ts = now
+        if self.db is not None and out:
+            self.db.executemany(
+                "UPDATE message_wakes SET status='dispatched'"
+                " WHERE wake_id=?",
+                [(w.wake_id,) for w in out])
+            self.db.commit()
         return out
+
+    # ── durability (scheduler thread only) ────────────────────────────
+    def on_settled(self, wake: Wake, now: float) -> None:
+        """Scheduler callback after the settle guard ran: the debt is
+        paid. Coalesced wakes settled inside their survivor settle
+        with it."""
+        if self.db is None:
+            return
+        ids = [wake.wake_id]
+        for merged in (wake.payload or {}).get("coalesced", []):
+            wid = merged.get("wake_id") if isinstance(merged, dict) else None
+            if wid:
+                ids.append(wid)
+        self.db.executemany(
+            "UPDATE message_wakes SET status='settled' WHERE wake_id=?",
+            [(i,) for i in ids])
+        self.db.commit()
+
+    def replay_pending(self, now: float, *,
+                       max_age_s: float = REPLAY_MAX_AGE_S,
+                       ) -> tuple[list[Wake], list[dict]]:
+        """Boot-time resurrection: re-queue every unsettled message wake
+        in original arrival order. Rows that died mid-turn (status
+        'dispatched') come back tagged maybe_retry — the prompt gets to
+        know the entity may have half-answered before dying. Rows older
+        than max_age_s are marked stale and skipped, not fired.
+        Returns (replayed wakes, skipped stale rows)."""
+        if self.db is None:
+            return [], []
+        rows = self.db.execute(
+            "SELECT * FROM message_wakes"
+            " WHERE status IN ('pending','dispatched')"
+            " ORDER BY created_ts, rowid").fetchall()
+        replayed: list[Wake] = []
+        skipped: list[dict] = []
+        for r in rows:
+            if now - r["created_ts"] > max_age_s:
+                self.db.execute(
+                    "UPDATE message_wakes SET status='stale'"
+                    " WHERE wake_id=?", (r["wake_id"],))
+                skipped.append(dict(r))
+                continue
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            payload.setdefault("sender", r["sender"])
+            payload.setdefault("text", r["text"])
+            payload.setdefault("channel", "chat")
+            payload["replayed"] = True
+            if r["status"] == "dispatched":
+                payload["maybe_retry"] = True
+            wake = Wake(
+                wake_id=r["wake_id"],
+                source="message",
+                reason=f"message from {r['sender']}"
+                       " (replayed after restart)",
+                payload=payload,
+                budget=dict(DEFAULT_BUDGET),
+                priority=PRIORITY_MESSAGE,
+                key=f"{payload.get('channel', 'chat')}:{r['sender']}",
+                ts=r["created_ts"],
+            )
+            self.db.execute(
+                "UPDATE message_wakes SET status='pending', replayed=1"
+                " WHERE wake_id=?", (r["wake_id"],))
+            self._queue.append(wake)
+            replayed.append(wake)
+        self.db.commit()
+        return replayed, skipped
 
 
 # ── senses ────────────────────────────────────────────────────────────
@@ -178,6 +296,24 @@ CREATE TABLE IF NOT EXISTS drive_events (
     kind     TEXT NOT NULL               -- seed | wake | satisfy
 );
 CREATE INDEX IF NOT EXISTS idx_drive_events ON drive_events(name, ts);
+
+-- Durable message wakes (2026-08-05 incident): a message the entity
+-- acknowledged (202) must survive the process that acknowledged it.
+-- Lifecycle: pending (queued) → dispatched (handed to the settle
+-- guard) → settled (episode written). Anything short of settled at
+-- boot is a debt and gets replayed; anything past REPLAY_MAX_AGE_S is
+-- marked stale instead — late honesty beats a ghost greeting.
+CREATE TABLE IF NOT EXISTS message_wakes (
+    wake_id    TEXT PRIMARY KEY,
+    sender     TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    payload    TEXT NOT NULL DEFAULT '{}', -- full wake payload (ctx, via)
+    created_ts REAL NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    replayed   INTEGER NOT NULL DEFAULT 0  -- has survived ≥1 restart
+);
+CREATE INDEX IF NOT EXISTS idx_message_wakes_status
+    ON message_wakes(status, created_ts);
 """
 
 
