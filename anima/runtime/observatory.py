@@ -461,6 +461,78 @@ body.past #chatform button, body.past #chatinput { opacity: .85; }
   #lineage, #ledger { max-height: 240px; }
 }
 
+/* ── under the hood: the machinery beneath (a footnote, not a hijack) ── */
+.hood { margin-top: 20px; }
+.hood > h2 .hoodlamp { color: var(--lamp); font-style: normal;
+  text-shadow: 0 0 14px rgba(255,180,94,.7);
+  animation: lamp 7s ease-in-out infinite; }
+.hoodgrid { display: grid; gap: 20px; align-items: start;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+.hoodhead { font-family: var(--serif); font-style: italic; font-size: 12px;
+  letter-spacing: .22em; color: var(--ink-dim); margin: 2px 0 10px; }
+.swapdot { display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--glow);
+  box-shadow: 0 0 8px var(--glow); vertical-align: 0; margin-right: 5px; }
+.swapdot.open { background: var(--lamp); box-shadow: 0 0 12px var(--lamp);
+  animation: heartbeat 1.4s ease-in-out infinite; }
+.tierrow { display: flex; align-items: baseline; gap: 10px;
+  margin: 12px 0 8px; }
+.tierrow:first-child { margin-top: 2px; }
+.tierrow .tn { font-family: var(--mono); font-size: 10px;
+  letter-spacing: .24em; text-transform: uppercase; color: var(--glow);
+  text-shadow: 0 0 8px rgba(94,234,212,.4); }
+button.mini { padding: 3px 12px; font-size: 10px; min-height: 0;
+  border-radius: 999px; }
+.cand { position: relative; border: 1px solid var(--line);
+  border-radius: 10px; background: rgba(3,9,12,.5);
+  padding: 8px 12px 8px 36px; margin: 0 0 8px; }
+.cand .ord { position: absolute; left: 10px; top: 10px; width: 16px;
+  height: 16px; line-height: 16px; text-align: center;
+  font-family: var(--mono); font-size: 9px; color: var(--ink-faint);
+  border: 1px solid var(--line2); border-radius: 50%; }
+.cand .pm { font-family: var(--serif); font-size: 13px;
+  color: var(--ink); }
+.cand .bu { font-family: var(--mono); font-size: 10px;
+  color: var(--ink-faint); margin-top: 2px; word-break: break-all; }
+.sdot { display: inline-block; width: 7px; height: 7px;
+  border-radius: 50%; margin-right: 6px; vertical-align: 1px;
+  flex: none; background: var(--ink-faint); }
+.sdot.ok { background: var(--glow); box-shadow: 0 0 9px var(--glow);
+  animation: heartbeat 4s ease-in-out infinite; }
+.sdot.warn { background: var(--lamp);
+  box-shadow: 0 0 8px rgba(255,180,94,.6); }
+.sdot.bad { background: var(--err); opacity: .6; box-shadow: none; }
+.jsonedit { width: 100%; min-height: 190px; resize: vertical;
+  background: rgba(3,9,12,.78); color: var(--ink);
+  border: 1px solid rgba(94,234,212,.3); border-radius: 10px;
+  padding: 10px 12px; font: 11px/1.55 var(--mono); outline: none; }
+.jsonedit:focus { border-color: rgba(94,234,212,.55);
+  box-shadow: 0 0 0 3px rgba(94,234,212,.06); }
+.editrow { display: flex; gap: 8px; margin: 8px 0 12px; }
+.editrow button { padding: 6px 16px; font-size: 11px; min-height: 0; }
+.ten { display: flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 11px; padding: 4px 2px;
+  border-bottom: 1px dotted rgba(94,234,212,.05); }
+.ten .tn2 { color: var(--ink); flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.ten .tst { color: var(--ink-faint); }
+.proxystats { font-family: var(--mono); font-size: 10px;
+  color: var(--ink-faint); margin-top: 8px; line-height: 1.7; }
+#hoodledger { font-family: var(--mono); font-size: 10.5px;
+  line-height: 1.75; color: var(--ink-dim); max-height: 200px;
+  overflow-y: auto; }
+#toast { position: fixed; left: 50%; bottom: 26px; z-index: 80;
+  transform: translateX(-50%) translateY(20px); opacity: 0;
+  pointer-events: none; background: var(--panel);
+  border: 1px solid var(--line2); border-radius: 999px;
+  padding: 9px 20px; font: 12px var(--mono); color: var(--ink);
+  backdrop-filter: blur(7px); box-shadow: 0 14px 40px rgba(0,0,0,.5);
+  transition: opacity .4s, transform .4s; }
+#toast.shown { opacity: 1; transform: translateX(-50%); }
+#toast.err { border-color: rgba(255,141,157,.5); color: var(--err); }
+@media (max-width: 980px) {
+  .hoodgrid { grid-template-columns: minmax(0, 1fr); } }
+
 footer { margin-top: 30px; text-align: center; font-family: var(--serif);
   font-style: italic; font-size: 11px; color: var(--ink-faint);
   letter-spacing: .18em; }
@@ -557,6 +629,25 @@ footer { margin-top: 30px; text-align: center; font-family: var(--serif);
       </section>
     </aside>
   </div>
+
+  <!-- under the hood: a discovered footnote at the floor of the dome -->
+  <section class="panel hood" data-fold="hood">
+    <h2><span class="hoodlamp">●</span> under the hood
+      <span class="note">routing, tenants, and the machinery beneath ·
+        <span class="swapdot" id="swapdot"></span><span id="swaplab">…</span></span></h2>
+    <div class="hoodgrid">
+      <div>
+        <div class="hoodhead">routing · who answers, in what order</div>
+        <div id="routing"><div class="empty">reading routing.json…</div></div>
+      </div>
+      <div>
+        <div class="hoodhead">tenants · the gpu boarding house</div>
+        <div id="tenants"><div class="empty">listening at the doors…</div></div>
+        <div class="hoodhead" style="margin-top:16px">ledger tail · the last eight receipts</div>
+        <div id="hoodledger"><div class="empty">quiet.</div></div>
+      </div>
+    </div>
+  </section>
 
   <footer>anima · the agent is the artifact · continuity is the product</footer>
 </div>
@@ -1158,6 +1249,151 @@ if (window.matchMedia("(max-width: 700px)").matches) {
 }
 window.addEventListener("resize", () => drawConstellation(hoverIdx));
 
+/* ── under the hood: routing + host machinery ──
+   The dome's engine room. Reads /api/routing (the failover ladder,
+   with a live TCP ping per candidate) and /api/under-the-hood (swap
+   proxy, GPU tenants, the shared swap marker, the last receipts).
+   Editing a tier fetches the CURRENT file, patches just that tier,
+   and POSTs the whole document — last-writer-wins, never a blind
+   clobber of stale state. */
+function showToast(msg, isErr) {
+  let t = $("toast");
+  if (!t) { t = document.createElement("div"); t.id = "toast";
+            document.body.appendChild(t); }
+  t.textContent = msg;
+  t.classList.toggle("err", !!isErr);
+  t.classList.add("shown");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.remove("shown"), 3200);
+}
+
+let lastRouting = null, editingTier = null;
+async function pollRouting() {
+  try { lastRouting = await api("/api/routing"); renderRouting(); }
+  catch (e) { $("routing").innerHTML =
+    '<div class="empty">routing.json unreadable.</div>'; }
+}
+function renderRouting() {
+  if (!lastRouting) return;
+  const tiers = (lastRouting.routing || {}).tiers || {};
+  const st = lastRouting.candidates_status || [];
+  const box = $("routing"); box.innerHTML = "";
+  for (const [tname, tier] of Object.entries(tiers)) {
+    const row = document.createElement("div");
+    row.className = "tierrow";
+    row.innerHTML = '<span class="tn">' + esc(tname) + "</span>";
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "mini";
+    btn.textContent = editingTier === tname ? "editing…" : "edit";
+    btn.disabled = editingTier === tname;
+    btn.addEventListener("click", () => {
+      editingTier = tname; renderRouting(); });
+    row.appendChild(btn);
+    box.appendChild(row);
+    if (editingTier === tname) {
+      box.appendChild(buildTierEditor(tname, tier)); continue; }
+    (tier.candidates || []).forEach((c, i) => {
+      const s = st.find(x => x.tier === tname && x.index === i) || {};
+      const el = document.createElement("div");
+      el.className = "cand";
+      el.innerHTML = '<span class="ord">' + (i + 1) + "</span>" +
+        '<div class="pm"><span class="sdot ' +
+        (s.alive ? "ok" : "bad") + '"></span>' +
+        esc(c.provider) + " · " + esc(c.model) + "</div>" +
+        '<div class="bu">' + esc(c.base_url) +
+        (s.alive && s.latency_ms != null
+          ? " · " + s.latency_ms + "ms" : "") + "</div>";
+      box.appendChild(el);
+    });
+  }
+  if (!box.childNodes.length)
+    box.innerHTML = '<div class="empty">no tiers configured.</div>';
+}
+function buildTierEditor(tname, tier) {
+  const wrap = document.createElement("div");
+  const ta = document.createElement("textarea");
+  ta.className = "jsonedit"; ta.spellcheck = false;
+  ta.value = JSON.stringify(tier, null, 2);
+  const row = document.createElement("div"); row.className = "editrow";
+  const save = document.createElement("button");
+  save.type = "button"; save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button"; cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => {
+    editingTier = null; renderRouting(); });
+  save.addEventListener("click", async () => {
+    let patch;
+    try { patch = JSON.parse(ta.value); }
+    catch (e) { showToast("invalid JSON: " + e.message, true); return; }
+    save.disabled = true;
+    try {
+      const fresh = await api("/api/routing");  /* fetch, patch, POST */
+      const doc = fresh.routing || {};
+      doc.tiers = doc.tiers || {};
+      doc.tiers[tname] = patch;
+      await api("/api/routing", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(doc) });
+      editingTier = null;
+      showToast("routing saved · " + tname + " · backup written");
+      await pollRouting();
+    } catch (e) {
+      save.disabled = false;
+      showToast("save failed: " + e.message, true);
+    }
+  });
+  row.appendChild(save); row.appendChild(cancel);
+  wrap.appendChild(ta); wrap.appendChild(row);
+  return wrap;
+}
+
+async function pollHood() {
+  try { renderHood(await api("/api/under-the-hood")); }
+  catch (e) { /* the engine room can wait a tick */ }
+}
+function renderHood(doc) {
+  const m = doc.gpu_swap_marker || {};
+  $("swapdot").classList.toggle("open", !!m.present);
+  $("swaplab").textContent = m.present
+    ? "swap window open · " + (m.age_seconds != null
+        ? m.age_seconds.toFixed(0) + "s" : "?")
+    : "swap window closed";
+  const sv = doc.services || {};
+  const eps = doc.endpoints || {};
+  let h = "";
+  for (const [unit, state] of Object.entries(sv)) {
+    const cls = state === "active" ? "ok"
+      : (state === "activating" || state === "inactive"
+         || state === "reloading") ? "warn" : "bad";
+    h += '<div class="ten"><span class="sdot ' + cls + '"></span>' +
+      '<span class="tn2">' + esc(unit.replace(".service", "")) +
+      '</span><span class="tst">' + esc(state) + "</span></div>";
+  }
+  for (const [name, ep] of Object.entries(eps)) {
+    h += '<div class="ten"><span class="sdot ' +
+      (ep.alive ? "ok" : "bad") + '"></span>' +
+      '<span class="tn2">' + esc(name) + '</span><span class="tst">' +
+      esc(String(ep.url || "").replace("http://", "")) +
+      (ep.alive && ep.latency_ms != null
+        ? " · " + ep.latency_ms + "ms" : "") + "</span></div>";
+  }
+  const p = doc.swap_proxy_health || {};
+  h += '<div class="proxystats">' + (p.error
+    ? "swap proxy: unreachable"
+    : "proxy · forwarded " + esc(p.forwarded ?? "—") +
+      " · waited_for_swap " + esc(p.waited_for_swap ?? "—") +
+      " · last_wait " + esc(p.last_wait_seconds ?? "—") + "s") +
+    "</div>";
+  $("tenants").innerHTML = h;
+  const tail = doc.ledger_tail || [];
+  $("hoodledger").innerHTML = tail.length ? tail.map(r =>
+    '<div class="ln"><span class="ts">' +
+    esc(typeof r.ts === "number" ? fmtTs(r.ts) : (r.ts || "")) +
+    '</span> <span class="k">' + esc(r.kind) + "</span> <b>" +
+    esc(r.detail) + "</b></div>").join("")
+    : '<div class="empty">quiet.</div>';
+}
+
 /* ── main loop ── */
 let firstPaint = true;
 async function tick() {
@@ -1172,6 +1408,7 @@ tick(); setInterval(tick, 3000);
 connectStream();
 initTimebar(); setInterval(() => { if (!past.active) initTimebar(); },
                            60000);
+pollRouting(); pollHood(); setInterval(pollHood, 5000);
 </script>
 </body>
 </html>

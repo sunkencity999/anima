@@ -59,9 +59,12 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import subprocess
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http import cookies as http_cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
@@ -77,6 +80,73 @@ _MAX_BODY = 256 * 1024
 _COOKIE = "anima_observatory"
 
 DEFAULT_PORT = 8762
+
+# Under-the-hood instrumentation (host machinery, not the entity):
+# the GPU tenants the routing layer depends on, the swap proxy that
+# absorbs model-swap windows, and the shared swap marker.
+_UTH_SERVICES = (
+    "llama-qwen3-235b-local.service",
+    "llama-qwen3-vl-30b.service",
+    "comfy-local.service",
+    "local-llm-swap-proxy.service",
+    "ollama.service",
+)
+_UTH_ENDPOINTS = {
+    "swap_proxy": "http://127.0.0.1:8106",
+    "upstream_235b": "http://127.0.0.1:8103",
+    "vision_vl": "http://127.0.0.1:8105",
+    "ollama": "http://127.0.0.1:11434",
+}
+_SWAP_MARKER = os.path.expanduser("~/.openclaw/state/gpu_swap_in_progress")
+
+
+def _tcp_alive(base_url: str, timeout: float = 0.5):
+    """TCP connect to base_url's host:port → (alive, latency_ms)."""
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        t0 = time.time()
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, round((time.time() - t0) * 1000, 1)
+    except OSError:
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _fetch_json(url: str, timeout: float = 0.5):
+    """GET url and parse JSON; {"error": "unreachable"} on any failure."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return {"error": "unreachable"}
+
+
+def _validate_routing(doc):
+    """→ None if valid, else a human error string. Shape contract:
+    dict with a `tiers` dict; each tier a dict with a `candidates`
+    list; each candidate has provider/model/base_url strings."""
+    if not isinstance(doc, dict):
+        return "body must be a JSON object"
+    tiers = doc.get("tiers")
+    if not isinstance(tiers, dict):
+        return 'missing or invalid "tiers" (must be an object)'
+    for tname, tier in tiers.items():
+        if not isinstance(tier, dict):
+            return f'tier "{tname}" must be an object'
+        cands = tier.get("candidates")
+        if not isinstance(cands, list):
+            return f'tier "{tname}" needs a "candidates" list'
+        for i, c in enumerate(cands):
+            if not isinstance(c, dict):
+                return f'tier "{tname}" candidate {i} must be an object'
+            for key in ("provider", "model", "base_url"):
+                if not isinstance(c.get(key), str) or not c.get(key):
+                    return (f'tier "{tname}" candidate {i}: '
+                            f'"{key}" must be a non-empty string')
+    return None
 
 
 class WebSense:
@@ -306,7 +376,143 @@ class WebSense:
                                      f"{_fmt_uptime(up)}")
                     return self._json(200, stats)
 
+                if path == "/api/routing":
+                    return self._routing_get()
+
+                if path == "/api/under-the-hood":
+                    return self._under_the_hood()
+
                 return self._json(404, {"error": "unknown endpoint"})
+
+            # ── under the hood: routing + host machinery ─────────────
+            def _routing_path(self) -> str:
+                return os.path.join(sense.shell.entity.root,
+                                    "identity", "routing.json")
+
+            def _routing_get(self):
+                rp = self._routing_path()
+                try:
+                    with open(rp, "r", encoding="utf-8") as f:
+                        routing = json.load(f)
+                    mtime = os.path.getmtime(rp)
+                except FileNotFoundError:
+                    return self._json(404, {"error": "routing.json "
+                                                     "not found",
+                                            "path": rp})
+                except (ValueError, OSError) as exc:
+                    return self._json(500, {"error": f"unreadable "
+                                                     f"routing.json: {exc}",
+                                            "path": rp})
+                status, seen = [], {}
+                for tname, tier in (routing.get("tiers") or {}).items():
+                    if not isinstance(tier, dict):
+                        continue
+                    for i, c in enumerate(tier.get("candidates") or []):
+                        if not isinstance(c, dict):
+                            continue
+                        base = str(c.get("base_url") or "")
+                        if base not in seen:       # ping each url once
+                            seen[base] = _tcp_alive(base)
+                        alive, lat = seen[base]
+                        status.append({
+                            "tier": tname, "index": i,
+                            "provider": c.get("provider"),
+                            "model": c.get("model"),
+                            "base_url": base,
+                            "alive": alive, "latency_ms": lat})
+                return self._json(200, {"routing": routing,
+                                        "candidates_status": status,
+                                        "path": rp, "mtime": mtime})
+
+            def _routing_post(self):
+                doc = self._read_json()
+                if doc is None:
+                    return self._json(400, {"error": "invalid JSON body"})
+                err = _validate_routing(doc)
+                if err:
+                    return self._json(400, {"error": err})
+                rp = self._routing_path()
+                try:
+                    if os.path.exists(rp):     # timestamped backup first
+                        stamp = time.strftime("%Y%m%d_%H%M%S")
+                        bak = f"{rp}.bak-{stamp}"
+                        with open(rp, "rb") as src, \
+                                open(bak, "wb") as dst:
+                            dst.write(src.read())
+                    tmp = rp + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(doc, f, indent=2)
+                        f.write("\n")
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp, rp)        # atomic: readers never
+                    #                            see a half-written file
+                    return self._json(200, {"ok": True,
+                                            "mtime": os.path.getmtime(rp)})
+                except OSError as exc:
+                    return self._json(500, {"error": f"write failed: "
+                                                     f"{exc}"})
+
+            def _under_the_hood(self):
+                out: dict = {}
+                # the swap proxy's own health doc, inlined
+                out["swap_proxy_health"] = _fetch_json(
+                    _UTH_ENDPOINTS["swap_proxy"] + "/_proxy/health")
+                # GPU tenants (systemd user units)
+                services = {}
+                for unit in _UTH_SERVICES:
+                    try:
+                        r = subprocess.run(
+                            ["systemctl", "--user", "is-active", unit],
+                            capture_output=True, text=True, timeout=1)
+                        services[unit] = (r.stdout.strip()
+                                          or r.stderr.strip()
+                                          or "unknown")
+                    except Exception:
+                        services[unit] = "unknown"
+                out["services"] = services
+                # the shared GPU-swap marker: a swap window is open
+                marker = {"present": False, "age_seconds": None,
+                          "path": _SWAP_MARKER}
+                try:
+                    st = os.stat(_SWAP_MARKER)
+                    marker["present"] = True
+                    marker["age_seconds"] = round(
+                        time.time() - st.st_mtime, 1)
+                except OSError:
+                    pass
+                out["gpu_swap_marker"] = marker
+                # last ledger actions (fall back to the lineage log)
+                tail = []
+                try:
+                    rows = sense._locked(
+                        sense.shell.entity.ledger.recent, 8)
+                    tail = [{"ts": r.get("ts"), "kind": r.get("kind"),
+                             "detail": r.get("detail")} for r in rows]
+                except Exception:
+                    try:
+                        lp = os.path.join(sense.shell.entity.root,
+                                          "identity", "lineage.log")
+                        with open(lp, "r", encoding="utf-8") as f:
+                            for line in f.readlines()[-8:]:
+                                bits = [b.strip() for b
+                                        in line.split("|", 2)]
+                                while len(bits) < 3:
+                                    bits.append("")
+                                tail.append({"ts": bits[0],
+                                             "kind": bits[1],
+                                             "detail": bits[2]})
+                    except OSError:
+                        pass
+                out["ledger_tail"] = tail
+                # the interesting local doors, and whether each answers
+                endpoints = {}
+                for name, url in _UTH_ENDPOINTS.items():
+                    alive, lat = _tcp_alive(url)
+                    endpoints[name] = {"url": url, "alive": alive,
+                                       "latency_ms": lat}
+                out["endpoints"] = endpoints
+                return self._json(200, out)
 
             # ── SSE stream ───────────────────────────────────────────
             def _stream(self, fresh: bool) -> None:
@@ -415,6 +621,12 @@ class WebSense:
                 authed, fresh = self._auth(query)
                 if not authed:
                     return self._json(401, {"error": "unauthorized"})
+                if path == "/api/routing":
+                    try:
+                        return self._routing_post()
+                    except Exception as exc:   # broken panel ≠ dead dome
+                        return self._json(500, {
+                            "error": f"{type(exc).__name__}: {exc}"})
                 if path != "/api/message":
                     return self._json(404, {"error": "unknown endpoint"})
                 doc = self._read_json()

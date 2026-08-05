@@ -53,9 +53,21 @@ _SETTLE_FENCE_RE = re.compile(
 
 _SETTLE_INSTRUCTIONS = """\
 ## How to act
-Use the provided tools to act. Use `reply` to answer the person who
-triggered this wake; a plain final message is a report to yourself, not
-a message to them.
+Use the provided tools to act.
+
+RULE — replying (non-negotiable): the ONLY way the person who triggered
+this wake ever sees your words is the `reply` tool. Plain assistant text
+is discarded unread. If this wake came from a message, you MUST call
+`reply` with your answer BEFORE writing any final text. Never put your
+answer in plain text — that is a silent failure.
+
+Correct turn shape for a message wake:
+1. (optional) other tool calls — recall, senses, etc.
+2. `reply({"text": "...your answer to them..."})`  ← required
+3. final plain message: settle block only, nothing else.
+
+Wrong (your answer is lost): finishing with plain text and no `reply`
+call.
 
 When you are done, end your FINAL message with a settle block:
 
@@ -227,6 +239,24 @@ def run_agent_turn(
 
         if not routed.tool_calls:
             final_content = routed.content or ""
+            # Reliability fix (2026-07-23): local models don't always call
+            # the `reply` tool even when they produce a coherent answer
+            # — the text lands in final_content and, without this fallback,
+            # vanishes silently instead of reaching the sender. Treat any
+            # non-empty final_content as an implicit reply when no reply
+            # tool call was made during the turn. Strip any settle-block
+            # trailer first so it doesn't leak into the surfaced message.
+            if final_content and not ctx.replies:
+                surface = final_content
+                sb_idx = surface.find("<settle>")
+                if sb_idx >= 0:
+                    surface = surface[:sb_idx].rstrip()
+                if surface:
+                    ctx.replies.append(surface)
+                    ctx.log("reply",
+                            "implicit reply from final_content "
+                            f"({len(surface)} chars)",
+                            model=f"{routed.provider}/{routed.model_used}")
             break
 
         messages.append({
