@@ -202,6 +202,57 @@ def run_doctor(root: str, *,
                              "no sqlite stores found — has this root "
                              "ever been woken?"))
 
+    # ── graph (Phase 7: rot visibility) ──────────────────────────────
+    mem_db = os.path.join(root, "memory", "memory.sqlite")
+    if os.path.exists(mem_db):
+        try:
+            conn = sqlite3.connect(
+                f"file:{mem_db}?mode=ro", uri=True, timeout=5)
+            try:
+                have = {r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+                if {"nodes", "edges"} <= have:
+                    n_nodes = conn.execute(
+                        "SELECT COUNT(*) FROM nodes").fetchone()[0]
+                    n_edges = conn.execute(
+                        "SELECT COUNT(*) FROM edges").fetchone()[0]
+                    n_stubs = conn.execute(
+                        "SELECT COUNT(*) FROM nodes WHERE stub=1"
+                    ).fetchone()[0]
+                    n_orphans = conn.execute(
+                        "SELECT COUNT(*) FROM nodes WHERE id NOT IN"
+                        " (SELECT src FROM edges) AND id NOT IN"
+                        " (SELECT dst FROM edges)").fetchone()[0]
+                    detail = (f"{n_nodes} nodes · {n_edges} edges · "
+                              f"{n_stubs} stubs · {n_orphans} orphans")
+                    if n_nodes == 0:
+                        checks.append(_check("graph", PASS,
+                                             "no graph yet — grows "
+                                             "from the present "
+                                             "backward"))
+                    elif n_nodes >= 25 and n_orphans / n_nodes > 0.6:
+                        checks.append(_check(
+                            "graph", WARN,
+                            f"{detail} — orphan-heavy; run "
+                            f"`anima graph gc --root {root}`"))
+                    elif n_nodes >= 25 and n_stubs / n_nodes > 0.5:
+                        checks.append(_check(
+                            "graph", WARN,
+                            f"{detail} — mostly stubs; extraction is "
+                            f"guessing more than it resolves"))
+                    else:
+                        checks.append(_check("graph", PASS, detail))
+                else:
+                    checks.append(_check("graph", PASS,
+                                         "pre-graph store (schema "
+                                         "upgrades on next wake)"))
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            checks.append(_check("graph", WARN,
+                                 f"graph unreadable: {exc}"))
+
     # ── backups ──────────────────────────────────────────────────────
     from .backup import default_dest
     dest = default_dest(root)

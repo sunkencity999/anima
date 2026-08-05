@@ -435,6 +435,32 @@ def cmd_doctor(args) -> int:
     return _doctor(args)
 
 
+# ── graph (Phase 7: rot resistance) ───────────────────────────────────────────
+
+def cmd_graph(args) -> int:
+    from .memory.graph import graph_gc
+    from .memory.store import MemoryStore
+    root = os.path.abspath(args.root)
+    if not os.path.exists(os.path.join(root, "identity", "lineage.log")):
+        print(f"no entity root at {root}", file=sys.stderr)
+        return 1
+    with MemoryStore(root) as store:
+        if args.verb == "stats":
+            print(json.dumps(store.graph_stats(), indent=2))
+            return 0
+        report = graph_gc(store,
+                          prune_threshold=args.threshold,
+                          half_life_days=args.half_life_days)
+    if getattr(args, "json", False):
+        print(json.dumps(report))
+    else:
+        print(f"graph gc: pruned {report['pruned_edges']} edge(s), "
+              f"merged {report['merged_stubs']} duplicate stub(s)")
+        print(f"now: {report['nodes']} nodes · {report['edges']} edges "
+              f"· {report['stubs']} stubs · {report['orphans']} orphans")
+    return 0
+
+
 # ── sky (the shared sky: multi-entity observatory) ──────────────────
 
 def _sky_template() -> dict:
@@ -592,6 +618,21 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true",
                    help="machine-readable output")
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser("graph",
+                       help="graph maintenance: gc prunes decayed "
+                            "edges and merges duplicate stubs; stats "
+                            "prints counts")
+    p.add_argument("verb", choices=("gc", "stats"))
+    p.add_argument("--root", required=True, help="entity root directory")
+    p.add_argument("--threshold", type=float, default=0.05,
+                   help="prune edges whose weight × age-decay falls "
+                        "below this (default 0.05)")
+    p.add_argument("--half-life-days", type=float, default=90.0,
+                   help="edge age-decay half-life (default 90)")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable output")
+    p.set_defaults(func=cmd_graph)
 
     p = sub.add_parser("sync", help="MIGRATE an entity root (forks diverge)")
     p.add_argument("root", help="source entity root")
