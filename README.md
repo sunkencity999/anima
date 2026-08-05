@@ -344,6 +344,39 @@ in the conventional dest newer than 8 days; pidlock state. Exit 0
 when nothing FAILs (warnings included), 1 on any FAIL — so it drops
 straight into scripts and unit `ExecStartPre=` lines.
 
+### Graph recall — memory as a web, not a list (Phase 7)
+
+Flat retrieval answers "what is *similar*"; the graph answers "what
+is *connected*": decision → the constraint that drove it → the
+incident that created the constraint. Two tables in the existing
+memory store (`nodes`, `edges`, typed and whitelisted); existing
+memories become nodes lazily. After each wake settles, a reflex-tier
+call extracts edge candidates from the settle report (confidence
+< 0.6 dropped; unresolvable hints become stub nodes; `supersedes`
+demotes, never deletes). The orient phase decides `flat` (default,
+cheap) or `graph` (why/how-did-we-get-here wakes, or low-diversity
+flat results) and, in graph mode, walks 1–2 hops from the flat seeds
+— ACL enforced at every traversed node, inside sqlite — returning
+≤ 12 nodes each carrying the rel-chain that explains WHY it arrived.
+The Observatory's marginalia shows those chains.
+
+```bash
+anima graph stats --root ~/entities/me   # node/edge/stub/orphan counts
+anima graph gc --root ~/entities/me      # prune decayed edges, merge
+                                         # duplicate stubs (rot resistance)
+```
+
+`anima doctor` gains a `graph` check (WARN when orphan- or
+stub-heavy). Standing rule enforced this phase (§6, owner directive):
+**introspection, not hardcoding** — `anima init` asks the endpoint
+(`GET /v1/models`) for its model id (falling back to an honest
+`"unknown"`), the Observatory displays the model each endpoint
+reports at render time (≤60s cache) and marks configured-vs-reported
+drift, and the under-the-hood tenants panel is driven entirely by
+`senses/web.json` (`"tenants": [{label, kind: "systemd-user"|"http",
+unit|url}]`; empty = hidden). No model or service name is baked into
+`anima/`.
+
 ### Deployment: `anima service` (the harness way)
 
 An entity that dies with the terminal isn't a companion, it's a demo.
