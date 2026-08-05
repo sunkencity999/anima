@@ -81,23 +81,77 @@ _COOKIE = "anima_observatory"
 
 DEFAULT_PORT = 8762
 
-# Under-the-hood instrumentation (host machinery, not the entity):
-# the GPU tenants the routing layer depends on, the swap proxy that
-# absorbs model-swap windows, and the shared swap marker.
-_UTH_SERVICES = (
-    "llama-qwen3-235b-local.service",
-    "llama-qwen3-vl-30b.service",
-    "comfy-local.service",
-    "local-llm-swap-proxy.service",
-    "ollama.service",
-)
-_UTH_ENDPOINTS = {
-    "swap_proxy": "http://127.0.0.1:8106",
-    "upstream_235b": "http://127.0.0.1:8103",
-    "vision_vl": "http://127.0.0.1:8105",
-    "ollama": "http://127.0.0.1:11434",
-}
-_SWAP_MARKER = os.path.expanduser("~/.openclaw/state/gpu_swap_in_progress")
+# Under-the-hood instrumentation is CONFIG-DRIVEN (Phase 7 §6, owner
+# directive 2026-08-05): the old hardcoded service names went stale
+# the moment the host evolved, and a panel that reports a retired
+# machine is worse than no panel. senses/web.json may carry:
+#
+#     "tenants": [{"label": "text llm", "kind": "systemd-user",
+#                  "unit": "some.service"},
+#                 {"label": "llm door", "kind": "http",
+#                  "url": "http://127.0.0.1:8103"}]
+#     "swap_marker": "/path/to/gpu_swap_in_progress"   (optional)
+#
+# Empty/absent tenants → the panel hides itself. Nothing in anima/
+# assumes which model (or service) answers any port.
+
+# Reported-model cache: the Observatory shows the model id the
+# endpoint reports AT RENDER TIME (drift is information — show it,
+# don't mask it), but never hangs the page on a dead endpoint: a
+# short TCP gate + short HTTP timeout, and every answer (including
+# "nobody home" = None) is cached for ≤60s.
+_MODEL_TTL_S = 60.0
+_model_cache: dict = {}          # base_url -> (ts, model_id_or_None)
+_model_cache_lock = threading.Lock()
+
+
+def reported_model_for(base_url: str, *, timeout_s: float = 1.5,
+                       now: Optional[float] = None) -> Optional[str]:
+    """The model id <base_url>/models reports right now, or None.
+    Cached ≤60s; a dead endpoint costs one fast TCP probe per minute."""
+    now = now if now is not None else time.time()
+    with _model_cache_lock:
+        hit = _model_cache.get(base_url)
+        if hit is not None and now - hit[0] < _MODEL_TTL_S:
+            return hit[1]
+    model: Optional[str] = None
+    alive, _ = _tcp_alive(base_url, timeout=0.5)
+    if alive:
+        try:
+            url = base_url.rstrip("/") + "/models"
+            with urllib.request.urlopen(url, timeout=timeout_s) as r:
+                doc = json.loads(r.read().decode("utf-8"))
+            for item in (doc.get("data") or doc.get("models") or []):
+                if isinstance(item, dict):
+                    mid = (item.get("id") or item.get("name")
+                           or item.get("model"))
+                    if mid:
+                        model = str(mid)
+                        break
+        except Exception:
+            model = None
+    with _model_cache_lock:
+        _model_cache[base_url] = (now, model)
+    return model
+
+
+def _normalize_tenants(raw) -> list:
+    """Whitelist-validate the configured tenant list. A malformed
+    entry is dropped, not fatal — a typo in web.json must not kill
+    the Observatory."""
+    out = []
+    for t in raw if isinstance(raw, list) else []:
+        if not isinstance(t, dict):
+            continue
+        kind = str(t.get("kind") or "")
+        label = str(t.get("label") or t.get("unit") or t.get("url") or "")
+        if kind == "systemd-user" and t.get("unit"):
+            out.append({"label": label, "kind": kind,
+                        "unit": str(t["unit"])})
+        elif kind == "http" and t.get("url"):
+            out.append({"label": label, "kind": kind,
+                        "url": str(t["url"])})
+    return out
 
 
 def _tcp_alive(base_url: str, timeout: float = 0.5):
@@ -113,15 +167,6 @@ def _tcp_alive(base_url: str, timeout: float = 0.5):
         return False, None
     except Exception:
         return False, None
-
-
-def _fetch_json(url: str, timeout: float = 0.5):
-    """GET url and parse JSON; {"error": "unreachable"} on any failure."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except Exception:
-        return {"error": "unreachable"}
 
 
 def _validate_routing(doc):
@@ -168,6 +213,10 @@ class WebSense:
         # Default matches the init template: LAN-exposed, token-gated.
         self.bind = str(config.get("bind", "0.0.0.0"))
         self.operator = str(config.get("operator_person") or "operator")
+        # Under-the-hood machinery panel: config-driven (Phase 7 §6).
+        self.tenants = _normalize_tenants(config.get("tenants"))
+        self.swap_marker = (str(config["swap_marker"])
+                            if config.get("swap_marker") else None)
         # SSE tunables (overridable in config; tests shrink them)
         self.stream_poll_s = float(config.get("stream_poll_s", 2.0))
         self.stream_heartbeat_s = float(
@@ -414,10 +463,16 @@ class WebSense:
                         if base not in seen:       # ping each url once
                             seen[base] = _tcp_alive(base)
                         alive, lat = seen[base]
+                        reported = (reported_model_for(base)
+                                    if alive else None)
+                        configured = c.get("model")
                         status.append({
                             "tier": tname, "index": i,
                             "provider": c.get("provider"),
-                            "model": c.get("model"),
+                            "model": configured,
+                            "reported_model": reported,
+                            "drift": bool(reported and configured
+                                          and reported != configured),
                             "base_url": base,
                             "alive": alive, "latency_ms": lat})
                 return self._json(200, {"routing": routing,
@@ -455,33 +510,46 @@ class WebSense:
 
             def _under_the_hood(self):
                 out: dict = {}
-                # the swap proxy's own health doc, inlined
-                out["swap_proxy_health"] = _fetch_json(
-                    _UTH_ENDPOINTS["swap_proxy"] + "/_proxy/health")
-                # GPU tenants (systemd user units)
-                services = {}
-                for unit in _UTH_SERVICES:
+                # tenants: whatever web.json declared, probed live.
+                # No configured tenants → empty list → panel hidden.
+                tenants = []
+                for t in sense.tenants:
+                    entry = dict(t)
+                    if t["kind"] == "systemd-user":
+                        try:
+                            r = subprocess.run(
+                                ["systemctl", "--user", "is-active",
+                                 t["unit"]],
+                                capture_output=True, text=True,
+                                timeout=1)
+                            entry["state"] = (r.stdout.strip()
+                                              or r.stderr.strip()
+                                              or "unknown")
+                        except Exception:
+                            entry["state"] = "unknown"
+                    else:  # http
+                        alive, lat = _tcp_alive(t["url"])
+                        entry["alive"] = alive
+                        entry["latency_ms"] = lat
+                        entry["state"] = "up" if alive else "down"
+                    tenants.append(entry)
+                out["tenants"] = tenants
+                # optional shared swap marker (config-driven path)
+                if sense.swap_marker:
+                    marker = {"present": False, "age_seconds": None,
+                              "path": sense.swap_marker}
                     try:
-                        r = subprocess.run(
-                            ["systemctl", "--user", "is-active", unit],
-                            capture_output=True, text=True, timeout=1)
-                        services[unit] = (r.stdout.strip()
-                                          or r.stderr.strip()
-                                          or "unknown")
-                    except Exception:
-                        services[unit] = "unknown"
-                out["services"] = services
-                # the shared GPU-swap marker: a swap window is open
-                marker = {"present": False, "age_seconds": None,
-                          "path": _SWAP_MARKER}
-                try:
-                    st = os.stat(_SWAP_MARKER)
-                    marker["present"] = True
-                    marker["age_seconds"] = round(
-                        time.time() - st.st_mtime, 1)
-                except OSError:
-                    pass
-                out["gpu_swap_marker"] = marker
+                        st = os.stat(sense.swap_marker)
+                        marker["present"] = True
+                        marker["age_seconds"] = round(
+                            time.time() - st.st_mtime, 1)
+                    except OSError:
+                        pass
+                    out["swap_marker"] = marker
+                # the model each routing endpoint reports at render
+                # time (≤60s cache) next to what routing.json claims —
+                # drift is information, show it.
+                out["models"] = self._model_reports()
                 # last ledger actions (fall back to the lineage log)
                 tail = []
                 try:
@@ -505,14 +573,38 @@ class WebSense:
                     except OSError:
                         pass
                 out["ledger_tail"] = tail
-                # the interesting local doors, and whether each answers
-                endpoints = {}
-                for name, url in _UTH_ENDPOINTS.items():
-                    alive, lat = _tcp_alive(url)
-                    endpoints[name] = {"url": url, "alive": alive,
-                                       "latency_ms": lat}
-                out["endpoints"] = endpoints
                 return self._json(200, out)
+
+            def _model_reports(self) -> list:
+                """[{base_url, configured (list), reported, drift}] for
+                every unique base_url in routing.json."""
+                try:
+                    with open(self._routing_path(), "r",
+                              encoding="utf-8") as f:
+                        routing = json.load(f)
+                except Exception:
+                    return []
+                configured: dict = {}
+                for tier in (routing.get("tiers") or {}).values():
+                    if not isinstance(tier, dict):
+                        continue
+                    for c in tier.get("candidates") or []:
+                        if isinstance(c, dict) and c.get("base_url"):
+                            configured.setdefault(
+                                str(c["base_url"]), set())
+                            if c.get("model"):
+                                configured[str(c["base_url"])].add(
+                                    str(c["model"]))
+                reports = []
+                for base, models in configured.items():
+                    reported = reported_model_for(base)
+                    reports.append({
+                        "base_url": base,
+                        "configured": sorted(models),
+                        "reported": reported,
+                        "drift": bool(reported and models
+                                      and reported not in models)})
+                return reports
 
             # ── SSE stream ───────────────────────────────────────────
             def _stream(self, fresh: bool) -> None:

@@ -516,6 +516,8 @@ button.mini { padding: 3px 12px; font-size: 10px; min-height: 0;
 .ten .tn2 { color: var(--ink); flex: 1; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
 .ten .tst { color: var(--ink-faint); }
+.rep { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+.drift { font-family: var(--mono); font-size: 10px; color: var(--warm, #d9a05b); }
 .proxystats { font-family: var(--mono); font-size: 10px;
   color: var(--ink-faint); margin-top: 8px; line-height: 1.7; }
 #hoodledger { font-family: var(--mono); font-size: 10.5px;
@@ -641,8 +643,10 @@ footer { margin-top: 30px; text-align: center; font-family: var(--serif);
         <div id="routing"><div class="empty">reading routing.json…</div></div>
       </div>
       <div>
-        <div class="hoodhead">tenants · the gpu boarding house</div>
+        <div class="hoodhead" id="tenanthead">tenants · the machinery this body leans on</div>
         <div id="tenants"><div class="empty">listening at the doors…</div></div>
+        <div class="hoodhead" id="modelhead" style="margin-top:16px">models · what each endpoint says it is</div>
+        <div id="hoodmodels"><div class="empty">asking…</div></div>
         <div class="hoodhead" style="margin-top:16px">ledger tail · the last eight receipts</div>
         <div id="hoodledger"><div class="empty">quiet.</div></div>
       </div>
@@ -1296,10 +1300,19 @@ function renderRouting() {
       const s = st.find(x => x.tier === tname && x.index === i) || {};
       const el = document.createElement("div");
       el.className = "cand";
+      /* the endpoint's own answer, at render time; when it disagrees
+         with routing.json, show BOTH — drift is information. */
+      let rep = "";
+      if (s.reported_model && s.drift)
+        rep = ' <span class="drift">⚠ endpoint reports “' +
+              esc(s.reported_model) + '” · drift</span>';
+      else if (s.reported_model)
+        rep = ' <span class="rep">· reports ' +
+              esc(s.reported_model) + '</span>';
       el.innerHTML = '<span class="ord">' + (i + 1) + "</span>" +
         '<div class="pm"><span class="sdot ' +
         (s.alive ? "ok" : "bad") + '"></span>' +
-        esc(c.provider) + " · " + esc(c.model) + "</div>" +
+        esc(c.provider) + " · " + esc(c.model) + rep + "</div>" +
         '<div class="bu">' + esc(c.base_url) +
         (s.alive && s.latency_ms != null
           ? " · " + s.latency_ms + "ms" : "") + "</div>";
@@ -1352,39 +1365,65 @@ async function pollHood() {
   catch (e) { /* the engine room can wait a tick */ }
 }
 function renderHood(doc) {
-  const m = doc.gpu_swap_marker || {};
-  $("swapdot").classList.toggle("open", !!m.present);
-  $("swaplab").textContent = m.present
-    ? "swap window open · " + (m.age_seconds != null
-        ? m.age_seconds.toFixed(0) + "s" : "?")
-    : "swap window closed";
-  const sv = doc.services || {};
-  const eps = doc.endpoints || {};
-  let h = "";
-  for (const [unit, state] of Object.entries(sv)) {
-    const cls = state === "active" ? "ok"
-      : (state === "activating" || state === "inactive"
-         || state === "reloading") ? "warn" : "bad";
-    h += '<div class="ten"><span class="sdot ' + cls + '"></span>' +
-      '<span class="tn2">' + esc(unit.replace(".service", "")) +
-      '</span><span class="tst">' + esc(state) + "</span></div>";
+  /* swap marker: only shown when web.json configures one */
+  const m = doc.swap_marker;
+  if (m) {
+    $("swapdot").style.display = "";
+    $("swapdot").classList.toggle("open", !!m.present);
+    $("swaplab").textContent = m.present
+      ? "swap window open · " + (m.age_seconds != null
+          ? m.age_seconds.toFixed(0) + "s" : "?")
+      : "swap window closed";
+  } else {
+    $("swapdot").style.display = "none";
+    $("swaplab").textContent = "";
   }
-  for (const [name, ep] of Object.entries(eps)) {
-    h += '<div class="ten"><span class="sdot ' +
-      (ep.alive ? "ok" : "bad") + '"></span>' +
-      '<span class="tn2">' + esc(name) + '</span><span class="tst">' +
-      esc(String(ep.url || "").replace("http://", "")) +
-      (ep.alive && ep.latency_ms != null
-        ? " · " + ep.latency_ms + "ms" : "") + "</span></div>";
+  /* tenants: config-driven (senses/web.json "tenants"); no config,
+     no panel — the dome never guesses at the host's machinery. */
+  const ts = doc.tenants || [];
+  if (!ts.length) {
+    $("tenanthead").style.display = "none";
+    $("tenants").style.display = "none";
+  } else {
+    $("tenanthead").style.display = "";
+    $("tenants").style.display = "";
+    let h = "";
+    for (const t of ts) {
+      const state = t.state || "unknown";
+      const cls = (state === "active" || state === "up") ? "ok"
+        : (state === "activating" || state === "inactive"
+           || state === "reloading") ? "warn" : "bad";
+      const detail = t.kind === "http"
+        ? esc(String(t.url || "").replace("http://", "")) +
+          (t.alive && t.latency_ms != null
+            ? " · " + t.latency_ms + "ms" : "")
+        : esc(state);
+      h += '<div class="ten"><span class="sdot ' + cls + '"></span>' +
+        '<span class="tn2">' + esc(t.label) + '</span>' +
+        '<span class="tst">' + detail + "</span></div>";
+    }
+    $("tenants").innerHTML = h;
   }
-  const p = doc.swap_proxy_health || {};
-  h += '<div class="proxystats">' + (p.error
-    ? "swap proxy: unreachable"
-    : "proxy · forwarded " + esc(p.forwarded ?? "—") +
-      " · waited_for_swap " + esc(p.waited_for_swap ?? "—") +
-      " · last_wait " + esc(p.last_wait_seconds ?? "—") + "s") +
-    "</div>";
-  $("tenants").innerHTML = h;
+  /* models: what each routing endpoint reports at render time */
+  const reps = doc.models || [];
+  if (!reps.length) {
+    $("modelhead").style.display = "none";
+    $("hoodmodels").style.display = "none";
+  } else {
+    $("modelhead").style.display = "";
+    $("hoodmodels").style.display = "";
+    $("hoodmodels").innerHTML = reps.map(r =>
+      '<div class="ten"><span class="sdot ' +
+      (r.reported ? "ok" : "bad") + '"></span><span class="tn2">' +
+      esc(String(r.base_url || "").replace("http://", "")) +
+      '</span><span class="tst">' +
+      (r.reported
+        ? esc(r.reported) + (r.drift
+            ? ' <span class="drift">⚠ configured: ' +
+              esc((r.configured || []).join(", ")) + "</span>"
+            : "")
+        : "no answer") + "</span></div>").join("");
+  }
   const tail = doc.ledger_tail || [];
   $("hoodledger").innerHTML = tail.length ? tail.map(r =>
     '<div class="ln"><span class="ts">' +

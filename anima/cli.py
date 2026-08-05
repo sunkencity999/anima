@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import urllib.request
 from typing import List, Optional
 
 
@@ -69,55 +70,63 @@ DRIVES_TEMPLATE = {
     },
 }
 
-ROUTING_TEMPLATE = {
-    "prefer_local_when": {"tiers": ["reflex"]},
-    "defaults": {
-        "max_retries_same": 2,
-        "backoff_base_s": 0.5,
-        "min_content_chars": 1,
-    },
-    "tiers": {
-        "reflex": {
-            "candidates": [
-                {
-                    "provider": "local",
-                    "model": "Qwen3-235B-A22B-Instruct-2507",
-                    "base_url": "http://127.0.0.1:8103/v1",
-                    "max_tokens": 1024,
-                    "timeout_s": 60,
-                    "cost_tier": "free",
-                    "local": True,
-                }
-            ]
+# Default local endpoint the scaffold points at. The MODEL is never
+# baked in (Phase 7 §6, owner directive 2026-08-05: the Observatory
+# once reported a retired model because a template lied): init asks
+# the endpoint what it serves and writes "unknown" when nobody answers.
+DEFAULT_LOCAL_ENDPOINT = "http://127.0.0.1:8103/v1"
+
+
+def probe_endpoint_model(base_url: str = DEFAULT_LOCAL_ENDPOINT,
+                         timeout_s: float = 3.0) -> str:
+    """GET <base_url>/models and return the first model id the endpoint
+    reports, or "unknown". Introspection, not hardcoding: templates
+    carry what the endpoint SAID, never what someone remembered."""
+    try:
+        url = base_url.rstrip("/") + "/models"
+        with urllib.request.urlopen(url, timeout=timeout_s) as r:
+            doc = json.loads(r.read().decode("utf-8"))
+        items = doc.get("data") or doc.get("models") or []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("id") or item.get("name") or item.get("model")
+            if mid:
+                return str(mid)
+    except Exception:
+        pass
+    return "unknown"
+
+
+def routing_template(model_id: str,
+                     base_url: str = DEFAULT_LOCAL_ENDPOINT) -> dict:
+    """The scaffolded routing policy, parameterized on the model id the
+    endpoint actually reported (or "unknown" — an honest placeholder
+    beats a confident lie)."""
+    def cand(max_tokens: int, timeout_s: int) -> dict:
+        return {
+            "provider": "local",
+            "model": model_id,
+            "base_url": base_url,
+            "max_tokens": max_tokens,
+            "timeout_s": timeout_s,
+            "cost_tier": "free",
+            "local": True,
+        }
+
+    return {
+        "prefer_local_when": {"tiers": ["reflex"]},
+        "defaults": {
+            "max_retries_same": 2,
+            "backoff_base_s": 0.5,
+            "min_content_chars": 1,
         },
-        "standard": {
-            "candidates": [
-                {
-                    "provider": "local",
-                    "model": "Qwen3-235B-A22B-Instruct-2507",
-                    "base_url": "http://127.0.0.1:8103/v1",
-                    "max_tokens": 4096,
-                    "timeout_s": 120,
-                    "cost_tier": "free",
-                    "local": True,
-                }
-            ]
+        "tiers": {
+            "reflex": {"candidates": [cand(1024, 60)]},
+            "standard": {"candidates": [cand(4096, 120)]},
+            "deep": {"candidates": [cand(8192, 300)]},
         },
-        "deep": {
-            "candidates": [
-                {
-                    "provider": "local",
-                    "model": "Qwen3-235B-A22B-Instruct-2507",
-                    "base_url": "http://127.0.0.1:8103/v1",
-                    "max_tokens": 8192,
-                    "timeout_s": 300,
-                    "cost_tier": "free",
-                    "local": True,
-                }
-            ]
-        },
-    },
-}
+    }
 
 TELEGRAM_TEMPLATE = {
     "token_env": "ANIMA_TELEGRAM_TOKEN",
@@ -189,7 +198,7 @@ def cmd_init(args) -> int:
         f.write("\n")
     with open(os.path.join(identity, "routing.json"), "w",
               encoding="utf-8") as f:
-        json.dump(ROUTING_TEMPLATE, f, indent=2)
+        json.dump(routing_template(probe_endpoint_model()), f, indent=2)
         f.write("\n")
     tg_path = os.path.join(root, "senses", "telegram.json")
     if not os.path.exists(tg_path):
