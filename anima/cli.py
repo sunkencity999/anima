@@ -127,6 +127,21 @@ TELEGRAM_TEMPLATE = {
 }
 
 
+def _http_template() -> dict:
+    # The HTTP sense is the universal adapter and it REQUIRES a bearer
+    # token — so init generates one, or `init → run --http` dies on the
+    # launch pad (the 2026-08 crash-loop lesson: a scaffold that can't
+    # boot the body it scaffolds is a trap, not a template). Loopback
+    # bind by default, deliberately: HTTP callers are local peripherals
+    # until the operator says otherwise.
+    import secrets
+    return {
+        "port": 8760,
+        "bind": "127.0.0.1",
+        "token": secrets.token_urlsafe(24),
+    }
+
+
 def _web_template(auth: str = "open") -> dict:
     # Home-mode default (owner decision 2026-07-22): LAN-exposed AND
     # open — if a person can reach the home network, they can connect
@@ -187,6 +202,12 @@ def cmd_init(args) -> int:
             json.dump(_web_template(getattr(args, "auth", "open")),
                       f, indent=2)
             f.write("\n")
+    http_path = os.path.join(root, "senses", "http.json")
+    if not os.path.exists(http_path):
+        with open(http_path, "w", encoding="utf-8") as f:
+            json.dump(_http_template(), f, indent=2)
+            f.write("\n")
+        os.chmod(http_path, 0o600)  # it holds a bearer token
 
     # Let EntityRoot assemble the organs once: creates the sqlite stores
     # and writes the "init" lineage entry (the birth certificate line).

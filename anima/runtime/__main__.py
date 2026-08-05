@@ -63,25 +63,48 @@ def main(argv=None) -> int:
         sys.stdin.isatty() and not args.http and not args.telegram
         and not args.web)
 
+    # A missing sense config degrades that sense, never the organism:
+    # the body keeps running with the senses it has. (Learned the hard
+    # way — a missing senses/http.json once crash-looped a live entity
+    # for ten silent days.)
     if args.http:
         from .senses.http_sense import HttpSense
         cfg = args.http_config or os.path.join(
             os.path.abspath(args.root), "senses", "http.json")
-        shell.add_sense("http", HttpSense(config_path=cfg))
+        if os.path.exists(cfg):
+            shell.add_sense("http", HttpSense(config_path=cfg))
+        else:
+            print(f"warning: --http requested but {cfg} is missing — "
+                  f"continuing without the http sense "
+                  f"(`anima init` scaffolds it)", file=sys.stderr)
 
     if args.telegram:
         from .senses.telegram_sense import TelegramSense
         cfg = args.telegram_config or os.path.join(
             os.path.abspath(args.root), "senses", "telegram.json")
-        shell.add_sense("telegram", TelegramSense(config_path=cfg))
+        if os.path.exists(cfg):
+            shell.add_sense("telegram", TelegramSense(config_path=cfg))
+        else:
+            print(f"warning: --telegram requested but {cfg} is missing — "
+                  f"continuing without the telegram sense "
+                  f"(`anima init` scaffolds it)", file=sys.stderr)
 
     if args.web:
         import json as _json
         from .senses.web_sense import WebSense
         cfg_path = args.web_config or os.path.join(
             os.path.abspath(args.root), "senses", "web.json")
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            web_cfg = _json.load(f)
+        web_cfg = None
+        if not os.path.exists(cfg_path):
+            print(f"warning: --web requested but {cfg_path} is missing — "
+                  f"continuing without the Observatory "
+                  f"(`anima init` scaffolds it)", file=sys.stderr)
+        else:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                web_cfg = _json.load(f)
+    else:
+        web_cfg = None
+    if web_cfg is not None:
         if args.bind is not None:
             web_cfg["bind"] = args.bind
         if args.web_port is not None:

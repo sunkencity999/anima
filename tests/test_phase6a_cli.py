@@ -57,6 +57,30 @@ def test_init_scaffolds_open_web_config_by_default(tmp_path):
     assert web["bind"] == "0.0.0.0"
 
 
+def test_init_scaffolds_http_config_with_token(tmp_path):
+    # init → run --http must work out of the box: the http sense
+    # REQUIRES a token, so the scaffold generates one.
+    root = _init(tmp_path)
+    http_path = root / "senses" / "http.json"
+    assert http_path.exists()
+    cfg = json.loads(http_path.read_text())
+    assert cfg["port"] == 8760
+    assert cfg["bind"] == "127.0.0.1"
+    assert len(cfg["token"]) >= 24
+    # holds a bearer token → owner-only
+    assert (http_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_init_preserves_existing_http_config(tmp_path):
+    root = tmp_path / "ent"
+    (root / "senses").mkdir(parents=True)
+    (root / "senses" / "http.json").write_text('{"port": 9999, '
+                                               '"token": "mine"}')
+    assert main(["init", str(root)]) == 0
+    cfg = json.loads((root / "senses" / "http.json").read_text())
+    assert cfg["port"] == 9999 and cfg["token"] == "mine"
+
+
 def test_init_auth_token_scaffolds_gated_web_config(tmp_path):
     root = tmp_path / "gated"
     assert main(["init", str(root), "--auth", "token"]) == 0
