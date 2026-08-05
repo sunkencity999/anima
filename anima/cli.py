@@ -412,6 +412,13 @@ def cmd_sync(args) -> int:
     return 0
 
 
+# ── backup ────────────────────────────────────────────────────────────────────
+
+def cmd_backup(args) -> int:
+    from .backup import cmd_backup as _backup
+    return _backup(args)
+
+
 # ── sky (the shared sky: multi-entity observatory) ──────────────────
 
 def _sky_template() -> dict:
@@ -549,6 +556,18 @@ def main(argv=None) -> int:
     p = sub.add_parser("status", help="inspect an entity root")
     p.add_argument("--root", required=True)
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("backup",
+                       help="timestamped tar.gz snapshot of an entity "
+                            "root (live-safe; sqlite via backup API)")
+    p.add_argument("--root", required=True, help="entity root directory")
+    p.add_argument("--dest", default=None,
+                   help="destination directory (default: "
+                        "<root>/../anima-backups/<rootname>/)")
+    p.add_argument("--keep", type=int, default=14,
+                   help="newest archives to retain after pruning "
+                        "(default 14)")
+    p.set_defaults(func=cmd_backup)
 
     p = sub.add_parser("sync", help="MIGRATE an entity root (forks diverge)")
     p.add_argument("root", help="source entity root")
