@@ -419,6 +419,13 @@ def cmd_backup(args) -> int:
     return _backup(args)
 
 
+# ── doctor ────────────────────────────────────────────────────────────────────
+
+def cmd_doctor(args) -> int:
+    from .doctor import cmd_doctor as _doctor
+    return _doctor(args)
+
+
 # ── sky (the shared sky: multi-entity observatory) ──────────────────
 
 def _sky_template() -> dict:
@@ -568,6 +575,14 @@ def main(argv=None) -> int:
                    help="newest archives to retain after pruning "
                         "(default 14)")
     p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("doctor",
+                       help="read-only preflight checks on an entity "
+                            "root (PASS/WARN/FAIL)")
+    p.add_argument("--root", required=True, help="entity root directory")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable output")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("sync", help="MIGRATE an entity root (forks diverge)")
     p.add_argument("root", help="source entity root")
