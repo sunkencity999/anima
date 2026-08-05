@@ -99,6 +99,7 @@ class RuntimeShell:
         router: Any = None,
         allow_shell: Optional[bool] = None,
         drives: Optional[Dict[str, dict]] = None,
+        graph_extraction: Optional[bool] = None,
     ):
         self.clock = clock
         self.tick_s = tick_s
@@ -115,6 +116,9 @@ class RuntimeShell:
         if allow_shell is None:
             allow_shell = bool(config.get("allow_shell", False))
         self.registry = registry or default_registry(allow_shell=allow_shell)
+        if graph_extraction is None:
+            graph_extraction = bool(config.get("graph_extraction", True))
+        self.graph_extraction = graph_extraction
 
         if router is None and policy_path:
             from ..routing import Router, RoutingPolicy
@@ -188,8 +192,26 @@ class RuntimeShell:
         with self._dispatch_lock:
             results = self.entity.scheduler.run_pending(
                 now=now if now is not None else self.clock())
+            self._extract_graph_edges(results)
         self._route_replies(results)
         return results
+
+    def _extract_graph_edges(self, results: List[dict]) -> None:
+        """Settle-time edge extraction (Phase 7 §2), inside the
+        dispatch cycle: single-writer discipline untouched, one
+        bounded reflex call per settled wake. Failure is logged and
+        swallowed — the organism never dies of bad bookkeeping."""
+        if not self.graph_extraction or self.router is None:
+            return
+        from ..memory.graph_extract import extract_edges_for_wake
+        for result in results:
+            receipt = result.get("receipt") or {}
+            if not result.get("ok") or not receipt.get("episode_ids"):
+                continue
+            extract_edges_for_wake(
+                self.entity.store, self.router,
+                result.get("report") or {}, receipt,
+                now=self.clock(), ledger=self.entity.ledger)
 
     # ── lifecycle ─────────────────────────────────────────────────────
     def start(self) -> None:

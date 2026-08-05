@@ -71,6 +71,7 @@ from typing import Any, Optional
 
 from ...relationships import AccessContext
 from ...relationships.acl import compile_acl
+from ...memory.graph import decide_recall_mode, recall_graph
 from ...memory.recall import recall_items
 from ...wake.orient import derive_query
 from ..observatory import LOCK_PAGE, render_page
@@ -737,7 +738,8 @@ class WebSense:
                 # Same wall as /api/memory/search: the operator's own
                 # direct context, compiled INSIDE sqlite; other
                 # people's private rows are structurally invisible.
-                recall = {"episodes": [], "beliefs": []}
+                recall = {"episodes": [], "beliefs": [], "graph": [],
+                          "mode": "flat"}
                 try:
                     items = sense._locked(
                         recall_items,
@@ -755,6 +757,30 @@ class WebSense:
                          "statement": str(b["statement"])[:200],
                          "confidence": b.get("confidence", 0.0)}
                         for b in items["beliefs"][:4]]
+                    # Graph marginalia (Phase 7): when this wake looks
+                    # multi-hop, show the rel-chains too. READ-ONLY —
+                    # this is an HTTP thread; the walk seeds only from
+                    # already-node-ified memories and touches nothing.
+                    mode = decide_recall_mode(derive_query(wake),
+                                              items["episodes"])
+                    recall["mode"] = mode
+                    if mode == "graph":
+                        walked = sense._locked(
+                            recall_graph,
+                            sense.shell.entity.store,
+                            derive_query(wake),
+                            access_context=ctx,
+                            relationships=(
+                                sense.shell.entity.relationships),
+                            now=sense.shell.clock(),
+                            readonly=True)
+                        recall["graph"] = [
+                            {"node_id": g["node_id"],
+                             "kind": g["kind"],
+                             "label": str(g["label"])[:200],
+                             "snippet": str(g["snippet"])[:200],
+                             "rel_chain": g["rel_chain"]}
+                            for g in walked if g["rel_chain"]][:6]
                 except Exception:
                     pass  # marginalia is garnish; the wake already queued
                 return self._json(202, {"queued": wake.wake_id,

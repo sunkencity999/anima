@@ -219,7 +219,8 @@ class TestMessageAndReplies:
         status, doc, _ = call(sense, "POST", "/api/message",
                               {"text": "hello from the dome"})
         assert status == 202 and doc["queued"].startswith("wake-msg-")
-        assert set(doc["recall"]) == {"episodes", "beliefs"}
+        assert set(doc["recall"]) == {"episodes", "beliefs",
+                                      "graph", "mode"}  # Phase 7
         results = shell.run_pending_once()
         assert len(results) == 1
         wake = results[0]["wake"]

@@ -228,6 +228,10 @@ header .spacer { flex: 1; }
   text-transform: uppercase; color: var(--glow); opacity: .85;
   margin-bottom: 2px; }
 .mnote.belief .mtag { color: var(--lamp); }
+.mnote.graphnote .mtag { color: var(--warm, #d9a05b); }
+.mnote .mchain { display: block; font-family: var(--mono);
+  font-style: normal; font-size: 8.5px; letter-spacing: .06em;
+  color: var(--ink-faint); margin-top: 2px; }
 
 /* ── composing indicator ── */
 .msg.thinking .dots i { display: inline-block; font-style: normal;
@@ -737,6 +741,13 @@ function renderMarginalia(rec) {
   for (const e of ((rec || {}).episodes || []))
     items.push({ tag: fmtTs(e.ts) || "episode", text: e.summary,
                  cls: "episode" });
+  /* graph recall (Phase 7): connected memories arrive with the
+     rel-chain that explains WHY — render the chain, faintly. */
+  for (const g of ((rec || {}).graph || []))
+    items.push({ tag: "graph · " + (g.kind || "node"),
+                 text: g.label,
+                 chain: (g.rel_chain || []).join(" "),
+                 cls: "graphnote" });
   if (!items.length) return;               /* keep the last set visible */
   box.innerHTML = '<div class="mhead">recalled while composing</div>';
   box.classList.add("has");
@@ -745,7 +756,9 @@ function renderMarginalia(rec) {
     const d = document.createElement("div");
     d.className = "mnote " + it.cls;
     d.innerHTML = '<span class="mtag">' + esc(it.tag) + "</span>" +
-                  esc(it.text);
+                  esc(it.text) +
+                  (it.chain ? '<span class="mchain">' + esc(it.chain) +
+                              "</span>" : "");
     box.appendChild(d);
     requestAnimationFrame(() => d.classList.add("shown"));
   }

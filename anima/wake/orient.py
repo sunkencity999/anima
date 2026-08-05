@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..memory.recall import recall
+from ..memory.graph import decide_recall_mode, recall_graph, render_graph_lines
+from ..memory.recall import recall, recall_items
 from ..memory.store import MemoryStore
 from .sources import DriveSource, TimerSource, Wake
 
@@ -86,11 +87,44 @@ def orient(
     lines.append("")
 
     # ── memory recall keyed on the wake itself ────────────────────────
-    pack = recall(store, derive_query(wake), token_budget=token_budget,
+    query = derive_query(wake)
+    pack = recall(store, query, token_budget=token_budget,
                   now=now, access_context=access_context,
                   relationships=relationships)
     lines.append(pack.rstrip())
     lines.append("")
+
+    # ── graph recall: the web behind the list (Phase 7) ───────────────
+    # Flat is the default (cheap). When the wake looks multi-hop —
+    # why/how-did-we-get-here/history cues, or flat results that are
+    # all similarity and no diversity — the delegated retriever walks
+    # the graph and hands back distilled nodes with their rel-chains.
+    # The wake payload may force a mode ("recall_mode": "graph"|"flat").
+    mode = (wake.payload or {}).get("recall_mode")
+    if mode not in ("graph", "flat"):
+        try:
+            flat = recall_items(
+                store, query, max_items=6, now=now,
+                access_context=access_context,
+                relationships=relationships)
+            mode = decide_recall_mode(query, flat["episodes"])
+        except Exception:
+            mode = "flat"   # a broken heuristic must not block orient
+    if mode == "graph":
+        try:
+            walked = recall_graph(
+                store, query, now=now,
+                access_context=access_context,
+                relationships=relationships)
+            connected = [w for w in walked if w["rel_chain"]]
+            if connected:
+                lines.append("## Graph recall (connected memories)")
+                lines.extend(render_graph_lines(
+                    [w for w in walked if not w["rel_chain"]][:4]
+                    + connected))
+                lines.append("")
+        except Exception:
+            pass   # graph recall is an organ, not a dependency
 
     # ── open intentions ───────────────────────────────────────────────
     if timer_source is not None:
