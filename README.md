@@ -465,6 +465,25 @@ API long polling — no SDK. Configure `R/senses/telegram.json`:
   restarts never replay old messages. Replies go back to the
   originating chat via sendMessage.
 
+### Durable message wakes — a 202 is a promise (2026-08-05)
+
+A live restart once ate a message: the wake was acknowledged, queued in
+memory, and died with the process — no error, no episode, just typing
+dots spinning forever. Now every injected message wake is persisted to
+`wake/wake.sqlite` (`pending → dispatched → settled`) and anything
+unsettled at boot **replays in arrival order** — wakes that died
+mid-turn come back tagged `maybe_retry` so the prompt knows to avoid
+double-acting; wakes older than 24h (`wake_replay_max_age_s` in
+`identity/config.json`) are marked stale and receipted in the ledger
+instead of fired days late. A graceful shutdown drains and settles
+everything, so a clean restart replays nothing. The Observatory keeps
+its end of the honesty bargain with the runtime's `boot_id` (in
+`/api/stats` and the SSE `hello` frame): if the entity restarts while
+the composing dots are up, the page says *"the entity restarted — your
+message was re-queued"*, and past `typing_stale_s` (default 120s) the
+dots become a visible *"still thinking… (Ns)"* counter. Dots are never
+allowed to be silent lies.
+
 ## Layout
 
 ```
