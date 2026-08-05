@@ -288,7 +288,61 @@ anima sync ~/entities/me /mnt/newhome/me   # MIGRATION, not cloning:
                             # records a migration lineage entry on the
                             # source BEFORE copying (both forks carry
                             # it), and warns that forks diverge.
+anima doctor --root ~/entities/me   # read-only preflight (below)
+anima backup --root ~/entities/me   # live-safe snapshot (below)
 ```
+
+`init` scaffolds every sense config the runtime knows how to attach —
+`senses/telegram.json`, `senses/web.json`, and `senses/http.json`
+(port 8760, loopback bind, generated bearer token, mode 0600) — so
+`init → run --http` works out of the box. And if a sense config goes
+missing anyway, the runtime warns and continues without that sense
+instead of dying: a missing sense never kills the body.
+
+### `anima backup` — snapshots of a life, taken while it's being lived
+
+An entity root IS the being; losing the directory is losing the
+entity. `anima backup` makes a timestamped tar.gz snapshot that is
+safe to take while the runtime is live: sqlite stores are captured
+through the sqlite3 backup API (transactionally consistent even
+mid-write under WAL), runtime scratch (`runtime.log`, `runtime.pid`,
+sockets, wal/shm sidecars) never travels, and the archive is renamed
+into place atomically so a crash can't leave a plausible-looking
+corpse.
+
+```bash
+anima backup --root ~/entities/me
+# {"backup": ".../anima-backups/me/me-20260805-103000.tar.gz",
+#  "bytes": 48123, "pruned": 0}
+
+anima backup --root ~/entities/me --dest /mnt/nas/me --keep 30
+```
+
+Default destination is `<root>/../anima-backups/<rootname>/` (outside
+the root, so backups never back up backups); pruning keeps the newest
+`--keep` archives (default 14). Output is one machine-readable JSON
+line. Put it on a timer — dailies are cheap, grief is not.
+
+### `anima doctor` — read-only preflight
+
+Every check is a failure mode that actually happened to a live
+entity. The doctor examines, never treats: no file written, no store
+touched, no lineage entry.
+
+```bash
+anima doctor --root ~/entities/me          # human-readable
+anima doctor --root ~/entities/me --json   # machine-readable
+```
+
+Checks, each PASS/WARN/FAIL with a one-line reason: root exists and
+has the expected structure; identity files parse (`drives.json`,
+`routing.json`); routing endpoints answer HTTP (3s timeout — WARN
+when down, the entity boots and fails over); each sense config parses
+and its port is sane (in-use port = WARN "likely already running",
+not FAIL); sqlite stores open and pass `quick_check`; a backup exists
+in the conventional dest newer than 8 days; pidlock state. Exit 0
+when nothing FAILs (warnings included), 1 on any FAIL — so it drops
+straight into scripts and unit `ExecStartPre=` lines.
 
 ### Deployment: `anima service` (the harness way)
 
