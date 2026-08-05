@@ -21,12 +21,21 @@ import sqlite3
 import time
 from typing import Any, Iterable, Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Scope whitelist duplicated from anima.relationships.acl to keep the
 # store importable standalone; the two MUST stay in sync (tested).
 KNOWN_SCOPES = ("private", "household", "shared", "public")
 DEFAULT_SCOPE = "shared"
+
+# Phase 7 graph vocabulary. Typed, whitelisted — an edge whose rel
+# isn't in this tuple is noise, and noisy edges are worse than none.
+NODE_KINDS = ("memory", "person", "decision", "commitment",
+              "artifact", "event", "belief")
+EDGE_RELS = ("involves", "caused", "supersedes", "contradicts",
+             "part_of", "felt_about")
+MAX_EDGES_PER_NODE = 64   # a node that connects to everything
+#                           explains nothing (spec §5)
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -134,6 +143,46 @@ CREATE TABLE IF NOT EXISTS consolidation_queue (
     resolution  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cq_status ON consolidation_queue(status);
+
+-- ── graph: memory as a web, not a list (Phase 7) ─────────────────────
+-- Existing memory rows become nodes LAZILY (memory_table/memory_id
+-- reference) — the graph grows from the present backward only when
+-- something touches old memories. Nodes carry the same scope/owner
+-- columns as every other table so the compiled ACL applies at every
+-- traversed node: a private node reached from a public seed is still
+-- private (the Phase 5 lesson, applied to traversal).
+CREATE TABLE IF NOT EXISTS nodes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL DEFAULT 'memory',
+    label        TEXT NOT NULL,
+    body         TEXT NOT NULL DEFAULT '',
+    memory_table TEXT,             -- episodic|semantic|procedural
+    memory_id    INTEGER,
+    created_at   REAL NOT NULL,
+    last_touched REAL NOT NULL,
+    touch_count  INTEGER NOT NULL DEFAULT 0,
+    weight       REAL NOT NULL DEFAULT 1.0,   -- demoted, never deleted
+    stub         INTEGER NOT NULL DEFAULT 0,  -- 1 = extraction hint
+    --                                          that resolved to nothing
+    scope        TEXT NOT NULL DEFAULT 'shared',
+    owner_person_id TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_memref
+    ON nodes(memory_table, memory_id) WHERE memory_table IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_nodes_label ON nodes(label COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS edges (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    src              INTEGER NOT NULL REFERENCES nodes(id),
+    dst              INTEGER NOT NULL REFERENCES nodes(id),
+    rel              TEXT NOT NULL,
+    weight           REAL NOT NULL DEFAULT 1.0,
+    created_at       REAL NOT NULL,
+    evidence_wake_id TEXT,
+    UNIQUE(src, dst, rel)
+);
+CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 """
 
 
@@ -609,6 +658,221 @@ class MemoryStore:
         )
         self.db.commit()
 
+    # ── graph: nodes + edges (Phase 7) ───────────────────────────────
+    def add_node(
+        self,
+        kind: str,
+        label: str,
+        body: str = "",
+        *,
+        memory_table: Optional[str] = None,
+        memory_id: Optional[int] = None,
+        stub: bool = False,
+        ts: Optional[float] = None,
+        scope: str = DEFAULT_SCOPE,
+        owner: Optional[str] = None,
+    ) -> int:
+        if kind not in NODE_KINDS:
+            raise ValueError(f"unknown node kind {kind!r}; known: "
+                             f"{NODE_KINDS}")
+        if not label or not label.strip():
+            raise ValueError("node label must be non-empty")
+        _validate_scope(scope)
+        now = ts if ts is not None else time.time()
+        cur = self.db.execute(
+            "INSERT INTO nodes (kind, label, body, memory_table,"
+            " memory_id, created_at, last_touched, touch_count, weight,"
+            " stub, scope, owner_person_id)"
+            " VALUES (?,?,?,?,?,?,?,0,1.0,?,?,?)",
+            (kind, label.strip()[:200], body, memory_table, memory_id,
+             now, now, 1 if stub else 0, scope, owner),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def get_node(self, node_id: int) -> Optional[dict]:
+        row = self.db.execute(
+            "SELECT * FROM nodes WHERE id=?", (node_id,)).fetchone()
+        return self._node_row(row) if row else None
+
+    def find_node_by_label(self, label: str) -> Optional[dict]:
+        """Exact (case-insensitive) label match; oldest wins so hints
+        resolve deterministically."""
+        row = self.db.execute(
+            "SELECT * FROM nodes WHERE label = ? COLLATE NOCASE"
+            " ORDER BY id LIMIT 1", (label.strip()[:200],)).fetchone()
+        return self._node_row(row) if row else None
+
+    def node_labels(self, limit: int = 500) -> list[tuple[int, str]]:
+        """(id, label) pairs, most recently created first — the fuzzy
+        resolver's candidate pool."""
+        rows = self.db.execute(
+            "SELECT id, label FROM nodes ORDER BY id DESC LIMIT ?",
+            (limit,)).fetchall()
+        return [(r["id"], r["label"]) for r in rows]
+
+    def node_for_memory(
+        self,
+        memory_table: str,
+        memory_id: int,
+        *,
+        kind: str,
+        label: str,
+        body: str = "",
+        ts: Optional[float] = None,
+        scope: str = DEFAULT_SCOPE,
+        owner: Optional[str] = None,
+    ) -> int:
+        """Lazy node-ification: get-or-create the node for an existing
+        memory row. No migration big-bang — the graph grows from the
+        present backward only when traversal touches old memories."""
+        row = self.db.execute(
+            "SELECT id FROM nodes WHERE memory_table=? AND memory_id=?",
+            (memory_table, memory_id)).fetchone()
+        if row:
+            return int(row["id"])
+        return self.add_node(kind, label, body,
+                             memory_table=memory_table,
+                             memory_id=memory_id, ts=ts,
+                             scope=scope, owner=owner)
+
+    def get_node_id_for_memory(self, memory_table: str,
+                               memory_id: int) -> Optional[int]:
+        """Read-only memory→node lookup (no lazy creation) — the
+        HTTP-thread-safe half of node_for_memory."""
+        row = self.db.execute(
+            "SELECT id FROM nodes WHERE memory_table=? AND memory_id=?",
+            (memory_table, memory_id)).fetchone()
+        return int(row["id"]) if row else None
+
+    def touch_nodes(self, node_ids: Iterable[int],
+                    ts: Optional[float] = None) -> None:
+        """Every recall that USES a node touches it — the graph learns
+        which of its regions are alive (spec §5)."""
+        now = ts if ts is not None else time.time()
+        self.db.executemany(
+            "UPDATE nodes SET last_touched=?, touch_count=touch_count+1"
+            " WHERE id=?",
+            [(now, int(i)) for i in node_ids])
+        self.db.commit()
+
+    def demote_node(self, node_id: int, factor: float = 0.5) -> None:
+        """Supersession demotes, never deletes — history stays
+        walkable."""
+        self.db.execute(
+            "UPDATE nodes SET weight = weight * ? WHERE id=?",
+            (max(0.0, min(1.0, factor)), node_id))
+        self.db.commit()
+
+    def add_edge(
+        self,
+        src: int,
+        dst: int,
+        rel: str,
+        weight: float = 1.0,
+        *,
+        evidence_wake_id: Optional[str] = None,
+        ts: Optional[float] = None,
+    ) -> Optional[int]:
+        """Insert (or strengthen) a typed edge. Duplicate (src,dst,rel)
+        keeps the higher weight. Both endpoints are then capped at
+        MAX_EDGES_PER_NODE, highest-weight kept."""
+        if rel not in EDGE_RELS:
+            raise ValueError(f"unknown edge rel {rel!r}; known: "
+                             f"{EDGE_RELS}")
+        if src == dst:
+            return None   # self-loops explain nothing
+        now = ts if ts is not None else time.time()
+        weight = max(0.0, min(1.0, weight))
+        existing = self.db.execute(
+            "SELECT id, weight FROM edges WHERE src=? AND dst=? AND"
+            " rel=?", (src, dst, rel)).fetchone()
+        if existing:
+            if weight > existing["weight"]:
+                self.db.execute("UPDATE edges SET weight=? WHERE id=?",
+                                (weight, existing["id"]))
+                self.db.commit()
+            return int(existing["id"])
+        cur = self.db.execute(
+            "INSERT INTO edges (src, dst, rel, weight, created_at,"
+            " evidence_wake_id) VALUES (?,?,?,?,?,?)",
+            (src, dst, rel, weight, now, evidence_wake_id))
+        edge_id = int(cur.lastrowid)
+        for node in (src, dst):
+            self._cap_edges(node)
+        self.db.commit()
+        return edge_id
+
+    def _cap_edges(self, node_id: int) -> None:
+        rows = self.db.execute(
+            "SELECT id FROM edges WHERE src=? OR dst=?"
+            " ORDER BY weight DESC, id DESC",
+            (node_id, node_id)).fetchall()
+        for row in rows[MAX_EDGES_PER_NODE:]:
+            self.db.execute("DELETE FROM edges WHERE id=?", (row["id"],))
+
+    def neighbors(self, node_ids: Iterable[int],
+                  acl=None) -> list[dict]:
+        """Edges touching any of node_ids, joined with the node at the
+        FAR end. The ACL fragment is applied to the far node INSIDE
+        sqlite — an unauthorized neighbor never leaves the database,
+        so traversal cannot leak what flat recall would not."""
+        ids = sorted({int(i) for i in node_ids})
+        if not ids:
+            return []
+        ph = ",".join("?" for _ in ids)
+        acl_sql, acl_params = _acl_where(acl, "n.")
+        out: list[dict] = []
+        for direction, here, there in (("out", "src", "dst"),
+                                       ("in", "dst", "src")):
+            rows = self.db.execute(
+                f"SELECT e.id AS edge_id, e.src, e.dst, e.rel,"
+                f" e.weight AS edge_weight, e.evidence_wake_id, n.*"
+                f" FROM edges e JOIN nodes n ON n.id = e.{there}"
+                f" WHERE e.{here} IN ({ph}){acl_sql}",
+                (*ids, *acl_params)).fetchall()
+            for r in rows:
+                node = self._node_row(r)
+                out.append({
+                    "edge_id": r["edge_id"],
+                    "from": r[here], "rel": r["rel"],
+                    "direction": direction,
+                    "edge_weight": r["edge_weight"],
+                    "node": node})
+        return out
+
+    def graph_stats(self) -> dict:
+        def count(sql: str, *args) -> int:
+            return int(self.db.execute(sql, args).fetchone()[0])
+
+        return {
+            "nodes": count("SELECT COUNT(*) FROM nodes"),
+            "edges": count("SELECT COUNT(*) FROM edges"),
+            "stubs": count("SELECT COUNT(*) FROM nodes WHERE stub=1"),
+            "orphans": count(
+                "SELECT COUNT(*) FROM nodes WHERE id NOT IN"
+                " (SELECT src FROM edges) AND id NOT IN"
+                " (SELECT dst FROM edges)"),
+        }
+
+    @staticmethod
+    def _node_row(row: sqlite3.Row) -> dict:
+        return {
+            "id": row["id"],
+            "kind": row["kind"],
+            "label": row["label"],
+            "body": row["body"],
+            "memory_table": row["memory_table"],
+            "memory_id": row["memory_id"],
+            "created_at": row["created_at"],
+            "last_touched": row["last_touched"],
+            "touch_count": row["touch_count"],
+            "weight": row["weight"],
+            "stub": bool(row["stub"]),
+            "scope": row["scope"],
+            "owner_person_id": row["owner_person_id"],
+        }
+
     # ── stats ─────────────────────────────────────────────────────────
     def stats(self) -> dict:
         def count(sql: str, *args) -> int:
@@ -624,6 +888,7 @@ class MemoryStore:
                     "SELECT COUNT(*) FROM semantic WHERE status='contradicted'"),
             },
             "skills": count("SELECT COUNT(*) FROM procedural"),
+            "graph": self.graph_stats(),
             "consolidation_pending": count(
                 "SELECT COUNT(*) FROM consolidation_queue WHERE status='pending'"),
         }
