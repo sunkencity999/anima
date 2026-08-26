@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS household (
 );
 """
 
+# Columns added after first release: (name, DDL). Applied idempotently
+# at open — CREATE TABLE IF NOT EXISTS never upgrades an existing
+# table, so late organs arrive as ALTERs.
+_MIGRATIONS = (
+    # Phase 8a: push subscriptions ARE relationship data — a way to
+    # reach a person lives behind that person's wall and dies with the
+    # relationship row. JSON list of {endpoint, keys, ua, created_ts}.
+    ("push_subscriptions",
+     "ALTER TABLE persons ADD COLUMN push_subscriptions "
+     "TEXT NOT NULL DEFAULT '[]'"),
+)
+
 _SAFE_ID = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -75,6 +87,11 @@ class RelationshipStore:
         self.db = sqlite3.connect(self.db_path, check_same_thread=False)  # shell serializes cross-thread access (Phase 5)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        cols = {r[1] for r in self.db.execute(
+            "PRAGMA table_info(persons)").fetchall()}
+        for col, ddl in _MIGRATIONS:
+            if col not in cols:
+                self.db.execute(ddl)
         self.db.commit()
 
     # ── lifecycle ─────────────────────────────────────────────────────
@@ -207,6 +224,7 @@ class RelationshipStore:
                 "allowed_contexts": _load(row["allowed_contexts"], []),
             },
             "household": self.is_household(row["person_id"]),
+            "push_subscriptions": _load(row["push_subscriptions"], []),
             "created_ts": row["created_ts"],
             "updated_ts": row["updated_ts"],
         }
@@ -250,6 +268,71 @@ class RelationshipStore:
     def household_members(self) -> FrozenSet[str]:
         rows = self.db.execute("SELECT person_id FROM household").fetchall()
         return frozenset(r["person_id"] for r in rows)
+
+    # ── push subscriptions (Phase 8a: reach) ─────────────────────────
+    def push_subscriptions(self, person_id: str) -> List[Dict[str, Any]]:
+        """That person's registered push endpoints (their devices).
+        Unknown person → empty list (nothing to reach)."""
+        row = self._row(person_id)
+        if row is None:
+            return []
+        try:
+            subs = json.loads(row["push_subscriptions"])
+        except (TypeError, ValueError):
+            return []
+        return [s for s in subs if isinstance(s, dict)]
+
+    def add_push_subscription(self, person_id: str,
+                              subscription: Dict[str, Any], *,
+                              ua: str = "") -> Dict[str, Any]:
+        """Register (or refresh) a device's push subscription for a
+        person. Keyed by endpoint — re-subscribing the same device
+        replaces its record; different endpoints stack (multiple
+        devices per person is the normal case)."""
+        if self._row(person_id) is None:
+            raise KeyError(f"unknown person {person_id!r}; upsert first")
+        endpoint = str((subscription or {}).get("endpoint") or "").strip()
+        keys = (subscription or {}).get("keys") or {}
+        p256dh = str(keys.get("p256dh") or "").strip()
+        auth = str(keys.get("auth") or "").strip()
+        if not endpoint.lower().startswith(("https://", "http://")):
+            raise ValueError("push subscription needs an http(s) endpoint")
+        if not p256dh or not auth:
+            raise ValueError(
+                "push subscription needs keys.p256dh and keys.auth")
+        record = {
+            "endpoint": endpoint,
+            "keys": {"p256dh": p256dh, "auth": auth},
+            "ua": str(ua or "")[:160],
+            "created_ts": self.clock(),
+        }
+        subs = [s for s in self.push_subscriptions(person_id)
+                if s.get("endpoint") != endpoint]
+        subs.append(record)
+        self._write_push_subscriptions(person_id, subs)
+        return record
+
+    def remove_push_subscription(self, person_id: str,
+                                 endpoint: str) -> bool:
+        """Drop one device. True when something was actually removed."""
+        subs = self.push_subscriptions(person_id)
+        kept = [s for s in subs if s.get("endpoint") != endpoint]
+        if len(kept) == len(subs):
+            return False
+        self._write_push_subscriptions(person_id, kept)
+        return True
+
+    def _write_push_subscriptions(self, person_id: str,
+                                  subs: List[Dict[str, Any]]) -> None:
+        self.db.execute(
+            "UPDATE persons SET push_subscriptions=?, updated_ts=?"
+            " WHERE person_id=?",
+            (json.dumps(subs, ensure_ascii=False), self.clock(),
+             person_id))
+        self.db.commit()
+        person = self.get_person(person_id)
+        if person:
+            self._mirror_profile(person)
 
     # ── write-time scope defaults from declarations ───────────────────
     def default_scope_for(self, person_id: str) -> tuple[str, Optional[str]]:
