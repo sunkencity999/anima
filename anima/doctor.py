@@ -24,6 +24,7 @@ import json
 import os
 import socket
 import sqlite3
+import stat
 import time
 import urllib.error
 import urllib.request
@@ -52,6 +53,19 @@ def _http_reachable(url: str, timeout_s: float = 3.0) -> bool:
         return False
 
 
+def _http_status(url: str, timeout_s: float = 3.0) -> Optional[int]:
+    """The actual status code at `url`, or None on transport failure.
+    (Unlike _http_reachable, a 404 here is a 404 — the PWA checks need
+    to know the asset is truly served, not just that a server lives.)"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
 def _port_in_use(bind: str, port: int, timeout_s: float = 0.5) -> bool:
     host = bind if bind not in ("0.0.0.0", "") else "127.0.0.1"
     try:
@@ -68,9 +82,12 @@ def _load_json(path: str):
 
 def run_doctor(root: str, *,
                probe: Optional[Callable[[str], bool]] = None,
+               fetch_status: Optional[Callable[[str],
+                                              Optional[int]]] = None,
                now: Optional[float] = None) -> Tuple[List[dict], int]:
     """Run every check against `root`. Returns (checks, exit_code)."""
     probe = probe or _http_reachable
+    fetch_status = fetch_status or _http_status
     now = now if now is not None else time.time()
     root = os.path.abspath(root)
     checks: List[dict] = []
@@ -171,6 +188,65 @@ def run_doctor(root: str, *,
                                      f"valid; port {port} free"))
         else:
             checks.append(_check(f"senses/{fn}", PASS, "valid JSON"))
+
+    # ── reach: VAPID keypair + PWA shell (Phase 8a) ─────────────────
+    vapid_priv = os.path.join(root, "identity", "vapid", "private_key")
+    vapid_pub = os.path.join(root, "identity", "vapid", "public_key")
+    if os.path.exists(vapid_priv) and os.path.exists(vapid_pub):
+        mode = stat.S_IMODE(os.stat(vapid_priv).st_mode)
+        if mode & 0o077:
+            checks.append(_check(
+                "vapid keypair", WARN,
+                f"present, but private key mode is {oct(mode)} — "
+                f"should be 0600"))
+        else:
+            checks.append(_check("vapid keypair", PASS,
+                                 "present; private key 0600"))
+    else:
+        checks.append(_check(
+            "vapid keypair", WARN,
+            "missing — push disabled; generated on the next "
+            "`anima run --web` (or `anima init` for new roots)"))
+
+    web_cfg_path = os.path.join(senses_dir, "web.json")
+    web_cfg = None
+    if os.path.exists(web_cfg_path):
+        try:
+            web_cfg = _load_json(web_cfg_path)
+        except (json.JSONDecodeError, OSError):
+            web_cfg = None    # already FAILed in the senses loop
+    if isinstance(web_cfg, dict):
+        # Probe only when THIS root's runtime holds its pidlock — a
+        # foreign process squatting the port is not our Observatory,
+        # and a doctor run against a cold root must stay offline.
+        from .cli import _lock_state
+        runtime_live = bool(_lock_state(root)["locked"])
+        wport = web_cfg.get("port")
+        wbind = str(web_cfg.get("bind", "127.0.0.1"))
+        whost = wbind if wbind not in ("0.0.0.0", "") else "127.0.0.1"
+        scheme = "https" if web_cfg.get("tls") else "http"
+        if runtime_live and isinstance(wport, int) and wport > 0 \
+                and _port_in_use(wbind, wport):
+            base = f"{scheme}://{whost}:{wport}"
+            for label, apath in (("pwa manifest",
+                                  "/manifest.webmanifest"),
+                                 ("pwa service worker", "/sw.js")):
+                status = fetch_status(base + apath)
+                if status == 200:
+                    checks.append(_check(label, PASS,
+                                         f"served (200 at {apath})"))
+                else:
+                    checks.append(_check(
+                        label, WARN,
+                        f"{apath} answered "
+                        f"{status if status is not None else 'nothing'}"
+                        f" — installability is broken (pre-8a "
+                        f"runtime still live?)"))
+        else:
+            checks.append(_check(
+                "pwa shell", PASS,
+                "web sense not live here — manifest + service worker "
+                "are code-served at boot"))
 
     # ── sqlite stores ────────────────────────────────────────────────
     stores = []

@@ -53,7 +53,10 @@ def test_fresh_root_with_reachable_endpoint_has_no_fail(root, tmp_path):
 
 def test_live_pidlock_is_pass_not_warn(root):
     (root / "runtime.pid").write_text(f"{os.getpid()}\n")
-    checks, code = run_doctor(str(root), probe=UP)
+    # fetch_status injected: a live pidlock makes the PWA checks want
+    # to probe the Observatory, and tests never touch the network
+    checks, code = run_doctor(str(root), probe=UP,
+                              fetch_status=lambda url: 200)
     assert code == 0
     assert "LIVE" in _by_name(checks)["pidlock"]["reason"]
 
