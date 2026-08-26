@@ -55,18 +55,25 @@ deliberately; in a full deployment changes here deserve co-signature
 - Destructive actions need a human in the loop.
 """
 
+# Drive budgets scaffold at risk_cap "normal" so drives can *reach*
+# (Phase 8a: the notify tool is risk "medium") — a drive that notices
+# something worth the person's pocket may say so. The per-settle notify
+# rail caps spam structurally; drop a drive back to "low" to make it
+# contemplative-only.
 DRIVES_TEMPLATE = {
     "curiosity": {
         "description": "explore something new and write down what was learned",
         "rate_per_hour": 0.05,
         "threshold": 1.0,
-        "budget": {"max_tokens": 4000, "max_actions": 8, "risk_cap": "low"},
+        "budget": {"max_tokens": 4000, "max_actions": 8,
+                   "risk_cap": "normal"},
     },
     "stewardship": {
         "description": "check on the systems and people in my care",
         "rate_per_hour": 0.1,
         "threshold": 1.0,
-        "budget": {"max_tokens": 4000, "max_actions": 8, "risk_cap": "low"},
+        "budget": {"max_tokens": 4000, "max_actions": 8,
+                   "risk_cap": "normal"},
     },
 }
 
@@ -224,6 +231,13 @@ def cmd_init(args) -> int:
     entity = EntityRoot(root)
     entity.close()
 
+    # Phase 8a (reach): the VAPID keypair is identity — the entity
+    # signs its own pushes — and the icon is its face mark. Grown at
+    # birth; regrown lazily by the web sense if ever deleted.
+    from .runtime.pwa import ensure_icons, ensure_vapid_keys
+    ensure_vapid_keys(root)
+    ensure_icons(root)
+
     print(f"entity root initialized at {root}")
     print("next steps:")
     print(f"  - edit {os.path.join(identity, 'soul.md')}")
@@ -256,6 +270,8 @@ def cmd_run(args) -> int:
         argv.append("--web")
     if args.web_config:
         argv += ["--web-config", args.web_config]
+    if getattr(args, "tls", False):
+        argv.append("--tls")
     if args.sender:
         argv += ["--sender", args.sender]
     return runtime_main(argv)
@@ -547,6 +563,7 @@ def cmd_service(args) -> int:
             return mgr.install(args.root, name=args.name,
                                web=not args.no_web,
                                telegram=args.telegram,
+                               tls=getattr(args, "tls", False),
                                force=args.force)
         if args.verb == "status":
             return mgr.status(args.root, name=args.name)
@@ -591,6 +608,11 @@ def main(argv=None) -> int:
     p.add_argument("--web", action="store_true",
                    help="serve the Observatory web GUI")
     p.add_argument("--web-config", default=None)
+    p.add_argument("--tls", action="store_true",
+                   help="serve the Observatory over HTTPS with a "
+                        "self-signed cert (identity/tls/; generated "
+                        "via openssl on first use) — required for "
+                        "push on iOS")
     p.add_argument("--sender", default=None,
                    help="person id for console messages")
     p.set_defaults(func=cmd_run)
@@ -666,6 +688,9 @@ def main(argv=None) -> int:
                         "(web is ON by default — it's the point)")
     p.add_argument("--telegram", action="store_true",
                    help="also attach the Telegram sense")
+    p.add_argument("--tls", action="store_true",
+                   help="serve the Observatory over HTTPS "
+                        "(self-signed; required for push on iOS)")
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing unit file on install")
     p.set_defaults(func=cmd_service)

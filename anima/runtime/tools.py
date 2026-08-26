@@ -43,6 +43,13 @@ RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 _HTTP_MAX_CHARS = 8000
 _RECALL_MAX_CHARS = 4000
+# Phase 8a: structural anti-spam — however the turn argues, at most
+# this many notify() executions land per settle. The action budget
+# already meters total tool use; this is the dedicated rail for the
+# one tool that reaches into a person's pocket.
+NOTIFY_MAX_PER_SETTLE = 3
+_NOTIFY_TITLE_MAX = 80
+_NOTIFY_BODY_MAX = 500
 
 
 def normalize_risk_cap(cap: Optional[str]) -> str:
@@ -85,6 +92,7 @@ class TurnContext:
     replies: List[str] = field(default_factory=list)
     drive_satisfactions: Dict[str, float] = field(default_factory=dict)
     actions_used: int = 0
+    notify_sends: int = 0   # Phase 8a: pushes landed this settle
 
     def log(self, kind: str, detail: str, *, outcome: str = "ok",
             **fields: Any) -> None:
@@ -341,6 +349,67 @@ def _tool_express(ctx: TurnContext, args: dict) -> dict:
             "chars": len(clean), "sanitized": sanitized}
 
 
+def _make_tool_notify(push_send: Callable[..., tuple]) -> Callable:
+    """notify(person, title, body, url?) — the entity's reach (Phase 8a).
+
+    Sends a Web Push to every device the person has subscribed, via the
+    injected transport (production: crypto.webpush.send_webpush; tests:
+    a stub — never real HTTP). A 404/410 from the push service means
+    that device's subscription died: it is pruned from the relationship
+    record on the spot. Ledger-logged like every act (registry.execute
+    writes the receipt), budget-metered twice: the ordinary max_actions
+    spend PLUS the NOTIFY_MAX_PER_SETTLE rail above.
+    """
+    def _tool_notify(ctx: TurnContext, args: dict) -> dict:
+        person = str(args.get("person", "")).strip()
+        title = str(args.get("title", "")).strip()[:_NOTIFY_TITLE_MAX]
+        body = str(args.get("body", "")).strip()[:_NOTIFY_BODY_MAX]
+        url = str(args.get("url") or "").strip() or None
+        if not person:
+            raise ValueError("notify requires a person")
+        if not title or not body:
+            raise ValueError("notify requires a title and a body")
+        if ctx.notify_sends >= NOTIFY_MAX_PER_SETTLE:
+            raise ValueError(
+                f"notify budget spent — max {NOTIFY_MAX_PER_SETTLE} "
+                f"pushes per settle; if it can wait, it should")
+        rels = ctx.entity.relationships
+        person_id = (person if rels.get_person(person) is not None
+                     else rels.resolve(person))
+        if person_id is None:
+            raise ValueError(f"unknown person {person!r}")
+        subs = rels.push_subscriptions(person_id)
+        if not subs:
+            raise ValueError(
+                f"{person_id} has no push subscriptions — they have "
+                f"not invited you into their pocket")
+        from .pwa import load_vapid_keys
+        vapid_keys = load_vapid_keys(ctx.entity.root)
+        if vapid_keys is None:
+            raise ValueError(
+                "no VAPID keypair under identity/vapid/ — push is not "
+                "set up for this entity yet")
+        payload = json.dumps(
+            {"title": title, "body": body, "url": url or "/"},
+            ensure_ascii=False).encode("utf-8")
+        delivered, pruned, failed = 0, 0, 0
+        for sub in subs:
+            status, _text = push_send(sub, payload, vapid_keys)
+            if status in (404, 410):
+                rels.remove_push_subscription(
+                    person_id, str(sub.get("endpoint")))
+                pruned += 1
+            elif 200 <= int(status) < 300:
+                delivered += 1
+            else:
+                failed += 1
+        ctx.notify_sends += 1
+        return {"person": person_id, "devices": len(subs),
+                "delivered": delivered, "pruned": pruned,
+                "failed": failed}
+    return _tool_notify
+
+
 def _tool_reply(ctx: TurnContext, args: dict) -> dict:
     text = str(args.get("text", "")).strip()
     if not text:
@@ -350,17 +419,25 @@ def _tool_reply(ctx: TurnContext, args: dict) -> dict:
         "via", "originating sense")}
 
 
+def _default_push_send(subscription: dict, payload: bytes,
+                       vapid_keys: dict) -> tuple:
+    from ..crypto import webpush
+    return webpush.send_webpush(subscription, payload, vapid_keys)
+
+
 def default_registry(
     *,
     allow_shell: bool = False,
     http_fetch: Optional[Callable[..., str]] = None,
     shell_runner: Optional[Callable[..., dict]] = None,
+    push_send: Optional[Callable[..., tuple]] = None,
 ) -> ToolRegistry:
     """The v1 built-in toolset from the design note. Transports for the
-    two outward-facing tools (http_get, shell) are injectable so tests
-    stay offline."""
+    outward-facing tools (http_get, shell, notify) are injectable so
+    tests stay offline."""
     fetch = http_fetch or _default_http_fetch
     run_shell = shell_runner or _default_shell_runner
+    send_push = push_send or _default_push_send
     reg = ToolRegistry(allow_shell=allow_shell)
 
     reg.register(Tool(
@@ -450,6 +527,29 @@ def default_registry(
         }, "required": ["url"]},
         fn=lambda ctx, args: str(fetch(str(args.get("url", ""))))[
             :_HTTP_MAX_CHARS]))
+
+    # Outbound reach (Phase 8a). Risk "medium": the design note calls
+    # the tier "outbound" — above the chat-safe low tools, below shell.
+    # Message and timer wakes (risk_cap normal) can reach; drive wakes
+    # opt in per-drive by raising their budget's risk_cap. The
+    # NOTIFY_MAX_PER_SETTLE rail caps spam structurally either way.
+    reg.register(Tool(
+        name="notify", risk="medium",
+        description="Send a push notification to a person's subscribed "
+                    "devices (their phone). Use it ONLY when a thought "
+                    "is worth the person's pocket — the bar is: would "
+                    "a considerate friend send this text? Optional url "
+                    "opens in their Observatory when tapped.",
+        parameters={"type": "object", "properties": {
+            "person": {"type": "string",
+                       "description": "person id, name, or alias"},
+            "title": {"type": "string"},
+            "body": {"type": "string"},
+            "url": {"type": "string",
+                    "description": "optional click-through path "
+                                   "(default /)"},
+        }, "required": ["person", "title", "body"]},
+        fn=_make_tool_notify(send_push)))
 
     reg.register(Tool(
         name="shell", risk="high",
