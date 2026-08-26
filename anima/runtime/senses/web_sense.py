@@ -210,6 +210,10 @@ class WebSense:
         self.token = str(config.get("token") or "")
         self.auth = _resolve_auth(config.get("auth"), self.token,
                                   what="web sense config")
+        # Phase 8a: serve over TLS with a self-signed cert under
+        # identity/tls/ — the only road to iOS push. Off by default;
+        # plain HTTP keeps everything but push working.
+        self.tls = bool(config.get("tls", False))
         self.port = int(config.get("port", DEFAULT_PORT))
         # Default matches the init template: LAN-exposed, token-gated.
         self.bind = str(config.get("bind", "0.0.0.0"))
@@ -232,6 +236,8 @@ class WebSense:
         self._replies: list = []
         self._replies_lock = threading.Lock()
         self._started_ts: Optional[float] = None
+        self._icon_cache: dict = {}
+        self._icon_lock = threading.Lock()
 
     # ── shared helpers ────────────────────────────────────────────────
     def _entity_name(self) -> str:
@@ -246,10 +252,31 @@ class WebSense:
         with self.shell._dispatch_lock:
             return fn(*args, **kwargs)
 
+    def _icon_bytes(self, size: int) -> bytes:
+        """The maskable icon, rendered once (lazily) to identity/pwa/
+        and memoized — subsequent requests are a dict hit."""
+        with self._icon_lock:
+            data = self._icon_cache.get(size)
+            if data is None:
+                from ..pwa import ensure_icon
+                path = ensure_icon(self.shell.entity.root, size)
+                with open(path, "rb") as f:
+                    data = f.read()
+                self._icon_cache[size] = data
+            return data
+
     # ── shell lifecycle hooks ─────────────────────────────────────────
     def start(self, shell: Any) -> None:
         self.shell = shell
         self._started_ts = time.time()
+        # Phase 8a: pre-8a roots grow their VAPID keypair on first run
+        # (init creates it for new roots). Failure degrades push only —
+        # the dome still opens.
+        try:
+            from ..pwa import ensure_vapid_keys
+            ensure_vapid_keys(shell.entity.root)
+        except Exception:
+            pass
         sense = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -327,6 +354,19 @@ class WebSense:
                                       "text/html; charset=utf-8",
                                       set_cookie=fresh)
 
+                # PWA shell assets (Phase 8a): served without auth —
+                # a home-screen install needs the manifest, worker and
+                # icons before any cookie exists, and they carry
+                # nothing but the entity's name and its colors. The
+                # wall stays where the data is: on / and /api/.
+                if path in ("/manifest.webmanifest", "/sw.js",
+                            "/icon-192.png", "/icon-512.png"):
+                    try:
+                        return self._pwa_asset(path)
+                    except Exception as exc:
+                        return self._json(500, {
+                            "error": f"{type(exc).__name__}: {exc}"})
+
                 if not path.startswith("/api/"):
                     return self._json(404, {"error": "unknown endpoint"})
                 if not authed:
@@ -341,8 +381,36 @@ class WebSense:
                     return self._json(500, {"error": f"{type(exc).__name__}"
                                                      f": {exc}"})
 
+            def _pwa_asset(self, path):
+                from ..pwa import render_manifest, render_sw
+                name = sense._entity_name()
+                if path == "/manifest.webmanifest":
+                    return self._send(
+                        200, render_manifest(name).encode("utf-8"),
+                        "application/manifest+json")
+                if path == "/sw.js":
+                    return self._send(
+                        200, render_sw(name).encode("utf-8"),
+                        "text/javascript; charset=utf-8")
+                size = 192 if "192" in path else 512
+                return self._send(200, sense._icon_bytes(size),
+                                  "image/png")
+
             def _api_get(self, path, query, fresh):
                 entity = sense.shell.entity
+
+                if path == "/api/push/vapid":
+                    # the applicationServerKey the browser subscribes
+                    # against — generated lazily for pre-8a roots
+                    from ..pwa import ensure_vapid_keys
+                    keys = ensure_vapid_keys(entity.root)
+                    subs = sense._locked(
+                        entity.relationships.push_subscriptions,
+                        sense.operator)
+                    return self._json(200, {
+                        "public_key": keys["public_key"],
+                        "person": sense.operator,
+                        "devices": len(subs)})
 
                 if path == "/api/replies":
                     with sense._replies_lock:
@@ -740,6 +808,13 @@ class WebSense:
                     except Exception as exc:   # broken panel ≠ dead dome
                         return self._json(500, {
                             "error": f"{type(exc).__name__}: {exc}"})
+                if path in ("/api/push/subscribe",
+                            "/api/push/unsubscribe"):
+                    try:
+                        return self._push_post(path)
+                    except Exception as exc:
+                        return self._json(500, {
+                            "error": f"{type(exc).__name__}: {exc}"})
                 if path != "/api/message":
                     return self._json(404, {"error": "unknown endpoint"})
                 doc = self._read_json()
@@ -807,7 +882,60 @@ class WebSense:
                                         "recall": recall},
                                   set_cookie=fresh)
 
+            # ── push subscription CRUD (Phase 8a) ──────────────────
+            def _push_post(self, path):
+                """Subscriptions land on the OPERATOR's relationship
+                record — the authed visitor of this sense IS the
+                operator (same identity contract as /api/message), so
+                the person's wall holds: nobody registers a device on
+                someone else's record through this door."""
+                doc = self._read_json()
+                if doc is None:
+                    return self._json(400, {"error": "invalid JSON body"})
+                rels = sense.shell.entity.relationships
+                if path == "/api/push/unsubscribe":
+                    endpoint = str(doc.get("endpoint") or "").strip()
+                    if not endpoint:
+                        return self._json(400,
+                                          {"error": "endpoint required"})
+                    removed = sense._locked(
+                        rels.remove_push_subscription,
+                        sense.operator, endpoint)
+                    subs = sense._locked(rels.push_subscriptions,
+                                         sense.operator)
+                    return self._json(200, {"ok": True,
+                                            "removed": bool(removed),
+                                            "devices": len(subs)})
+                sub = doc.get("subscription")
+                if not isinstance(sub, dict):
+                    sub = doc
+                ua = str(doc.get("ua") or "")[:160]
+
+                def _register():
+                    if rels.get_person(sense.operator) is None:
+                        rels.upsert_person(sense.operator)
+                    return rels.add_push_subscription(
+                        sense.operator, sub, ua=ua)
+                try:
+                    sense._locked(_register)
+                except ValueError as exc:
+                    return self._json(400, {"error": str(exc)})
+                subs = sense._locked(rels.push_subscriptions,
+                                     sense.operator)
+                return self._json(200, {"ok": True,
+                                        "person": sense.operator,
+                                        "devices": len(subs)})
+
         self.server = ThreadingHTTPServer((self.bind, self.port), Handler)
+        if self.tls:
+            import ssl
+            from ..pwa import ensure_tls_cert
+            cert_p, key_p = ensure_tls_cert(
+                shell.entity.root, entity_name=self._entity_name())
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_ctx.load_cert_chain(cert_p, key_p)
+            self.server.socket = ssl_ctx.wrap_socket(
+                self.server.socket, server_side=True)
         self.port = self.server.server_address[1]  # resolve port 0
         self._thread = threading.Thread(
             target=self.server.serve_forever, daemon=True,

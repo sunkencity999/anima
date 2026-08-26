@@ -48,6 +48,10 @@ def main(argv=None) -> int:
                          "(e.g. 0.0.0.0 for LAN, 127.0.0.1 for loopback)")
     ap.add_argument("--web-port", type=int, default=None,
                     help="override the web sense port")
+    ap.add_argument("--tls", action="store_true",
+                    help="serve the Observatory over HTTPS with a "
+                         "self-signed cert under identity/tls/ "
+                         "(required for push on iOS)")
     ap.add_argument("--sender", default="operator",
                     help="person id for console messages")
     args = ap.parse_args(argv)
@@ -109,14 +113,17 @@ def main(argv=None) -> int:
             web_cfg["bind"] = args.bind
         if args.web_port is not None:
             web_cfg["port"] = args.web_port
+        if args.tls:
+            web_cfg["tls"] = True
         web = WebSense(web_cfg)
         shell.add_sense("web", web)
         host = web.bind if web.bind not in ("0.0.0.0", "") else _lan_ip()
+        scheme = "https" if web.tls else "http"
         if web.auth == "open":
-            print(f"observatory: http://{host}:{web.port}/  (open — "
+            print(f"observatory: {scheme}://{host}:{web.port}/  (open — "
                   f"anyone on the LAN can say hello)", file=sys.stderr)
         else:
-            print(f"observatory: http://{host}:{web.port}/?token=… "
+            print(f"observatory: {scheme}://{host}:{web.port}/?token=… "
                   f"(token in the web sense config)", file=sys.stderr)
 
     if use_console:

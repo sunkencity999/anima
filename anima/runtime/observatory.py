@@ -33,8 +33,17 @@ PAGE_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>__NAME__ — Observatory</title>
+<meta name="theme-color" content="#06121a">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="__NAME__">
 <style>
 :root {
   --abyss:  #030809;
@@ -57,6 +66,7 @@ html, body { margin: 0; min-height: 100%; }
 html { background: var(--abyss); }  /* base under the fixed gradients —
   keeps overscroll/long pages dark on phones where background-attachment:
   fixed degrades */
+body { overflow-x: hidden; }  /* no horizontal scroll, ever (mobile) */
 body {
   font-family: var(--sans); color: var(--ink);
   background:
@@ -99,7 +109,11 @@ body::after {
 }
 
 .wrap { max-width: 1380px; margin: 0 auto; padding: 22px 24px 70px;
-        position: relative; z-index: 1; }
+        position: relative; z-index: 1;
+        /* installed on a phone: respect the notch and the home bar */
+        padding-left: max(24px, env(safe-area-inset-left));
+        padding-right: max(24px, env(safe-area-inset-right));
+        padding-bottom: max(70px, env(safe-area-inset-bottom)); }
 
 /* ── header ── */
 header { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
@@ -444,21 +458,39 @@ body.past #chatform button, body.past #chatinput { opacity: .85; }
   .mnote { flex: 0 0 200px; margin: 0; font-size: 11px; }
 }
 @media (max-width: 700px) {
-  .wrap { padding: 12px 12px 44px; }
+  .wrap { padding: 12px 12px 44px;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: max(44px, env(safe-area-inset-bottom)); }
   header { gap: 10px; padding-bottom: 14px; margin-bottom: 14px; }
   header h1 { font-size: 22px; }
   header .sub { display: none; }
   .pill { font-size: 10px; padding: 4px 10px; }
   .panel { padding: 12px 14px; border-radius: 12px;
     backdrop-filter: none; }         /* cheap on phone GPUs */
-  .obsgrid { gap: 14px; }
-  .rail-l .panel, .rail-r .panel { margin-bottom: 14px; }
+  /* one true column: the rails dissolve (display: contents) and the
+     instruments re-order by what a phone reader wants — dialogue,
+     then what it made, then the drive strip; the archives fold below */
+  .obsgrid { display: flex; flex-direction: column; gap: 14px; }
+  .rail-l, .rail-r { display: contents; }
+  .rail-l .panel, .rail-r .panel { margin-bottom: 0; }
+  main.centre { order: 0; }
+  [data-fold="exprs"] { order: 1; }
+  [data-fold="drives"] { order: 2; }
+  [data-fold="lineage"] { order: 3; }
+  [data-fold="ledger"] { order: 4; }
+  [data-fold="memory"] { order: 5; }
+  [data-fold="reach"] { order: 6; }
+  /* the drive gauges breathe in a strip: one row, momentum scroll */
+  #drives { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+    justify-content: flex-start; -webkit-overflow-scrolling: touch;
+    padding-bottom: 6px; }
   #chatlog { height: min(48dvh, 420px); }
   .msg { max-width: 94%; font-size: 15px; }
   #chatinput, #meminput { font-size: 16px; min-height: 44px; }
   button { min-height: 44px; padding: 10px 18px; }
   #exprs { columns: 1; max-height: 380px; }
-  .drive { width: 104px; }
+  .drive { width: 104px; flex: 0 0 auto; }
   .timebar { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
   .timebar .tword { display: none; }
   #tlab { min-width: 0; }
@@ -468,6 +500,33 @@ body.past #chatform button, body.past #chatinput { opacity: .85; }
   #scrub::-moz-range-thumb { width: 24px; height: 24px; }
   #lineage, #ledger { max-height: 240px; }
 }
+
+/* ── reach: push notifications (Phase 8a) ──
+   A settings card, not a nag: one button, plain words about what it
+   does, and the honest reason when the browser can't do it at all. */
+#reachbtn { width: 100%; min-height: 44px; }
+#reachbtn.on { background: linear-gradient(180deg, rgba(255,180,94,.16),
+  rgba(255,180,94,.05)); color: var(--lamp);
+  border-color: rgba(255,180,94,.4); }
+#reachbtn.on:hover { box-shadow: 0 0 20px rgba(255,180,94,.25); }
+#reachnote { font-family: var(--serif); font-style: italic;
+  font-size: 11.5px; line-height: 1.6; color: var(--ink-faint);
+  margin-top: 9px; }
+#reachnote.err { color: var(--err); }
+
+/* ── add-to-home-screen affordance: subtle, once, dismissible ── */
+#a2hs { position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: max(18px, env(safe-area-inset-bottom)); z-index: 70;
+  display: none; align-items: center; gap: 12px;
+  background: var(--panel); border: 1px solid var(--line2);
+  border-radius: 999px; padding: 9px 12px 9px 20px;
+  font: 12px var(--serif); font-style: italic; color: var(--ink-dim);
+  backdrop-filter: blur(7px); box-shadow: 0 14px 40px rgba(0,0,0,.5); }
+#a2hs.shown { display: flex; }
+#a2hs button { min-height: 32px; padding: 5px 14px; font-size: 11px; }
+#a2hs .dismiss { background: none; border: none; color: var(--ink-faint);
+  font-size: 15px; padding: 5px 8px; min-height: 32px; }
+#a2hs .dismiss:hover { box-shadow: none; color: var(--ink-dim); }
 
 /* ── under the hood: the machinery beneath (a footnote, not a hijack) ── */
 .hood { margin-top: 20px; }
@@ -637,8 +696,22 @@ footer { margin-top: 30px; text-align: center; font-family: var(--serif);
         </form>
         <div id="memresults"></div>
       </section>
+
+      <section class="panel" data-fold="reach">
+        <h2><span class="tick">✶</span> reach
+          <span class="note">notifications, by invitation</span></h2>
+        <button type="button" id="reachbtn" disabled>checking…</button>
+        <div id="reachnote">Let __NAME__ reach you here — a push
+          notification on this device when it has something genuinely
+          worth your pocket. Revocable any time, right here.</div>
+      </section>
     </aside>
   </div>
+
+  <div id="a2hs"><span>keep __NAME__ on your home screen?</span>
+    <button type="button" id="a2hsgo">install</button>
+    <button type="button" class="dismiss" id="a2hsno"
+            aria-label="dismiss">×</button></div>
 
   <!-- under the hood: a discovered footnote at the floor of the dome -->
   <section class="panel hood" data-fold="hood">
@@ -1488,6 +1561,120 @@ function renderHood(doc) {
     '</span> <span class="k">' + esc(r.kind) + "</span> <b>" +
     esc(r.detail) + "</b></div>").join("")
     : '<div class="empty">quiet.</div>';
+}
+
+/* ── the shell (Phase 8a): service worker + install + reach ──
+   The worker caches the static shell only — every /api/ request rides
+   the network, presence is never answered from a cache. */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+/* add-to-home-screen: subtle, once, dismissible — no nag */
+let a2hsEvent = null;
+window.addEventListener("beforeinstallprompt", ev => {
+  ev.preventDefault();
+  if (localStorage.getItem("anima_a2hs_seen")) return;
+  a2hsEvent = ev;
+  $("a2hs").classList.add("shown");
+});
+$("a2hsgo").addEventListener("click", async () => {
+  localStorage.setItem("anima_a2hs_seen", "1");
+  $("a2hs").classList.remove("shown");
+  if (a2hsEvent) { a2hsEvent.prompt(); a2hsEvent = null; }
+});
+$("a2hsno").addEventListener("click", () => {
+  localStorage.setItem("anima_a2hs_seen", "1");
+  $("a2hs").classList.remove("shown");
+});
+
+/* reach: pushManager.subscribe ↔ the relationship record.
+   Honesty first — when the platform can't do push (plain HTTP on a
+   LAN, iOS before install), the card says WHY instead of a dead
+   button. */
+function b64uToBytes(s) {
+  const pad = "=".repeat((4 - s.length % 4) % 4);
+  const raw = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+async function pushState() {
+  const reg = await navigator.serviceWorker.ready;
+  return { reg, sub: await reg.pushManager.getSubscription() };
+}
+function reachUi(on, note, isErr) {
+  const btn = $("reachbtn");
+  btn.disabled = false;
+  btn.classList.toggle("on", !!on);
+  btn.textContent = on ? "◉ reaching you here — tap to stop"
+                       : "let " + ENT + " reach you here";
+  if (note) { $("reachnote").textContent = note;
+              $("reachnote").classList.toggle("err", !!isErr); }
+}
+async function initReach() {
+  const btn = $("reachbtn");
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    btn.textContent = "push unavailable here";
+    const why = window.isSecureContext
+      ? "This browser has no Web Push. On iOS: install to the home "
+        + "screen first (share → Add to Home Screen), then return here."
+      : "Push needs HTTPS — this page is plain HTTP. Everything else "
+        + "works; run the entity with --tls to enable reach.";
+    $("reachnote").textContent = why;
+    return;
+  }
+  try {
+    const { sub } = await pushState();
+    reachUi(!!sub);
+  } catch (e) { btn.textContent = "push unavailable here"; return; }
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    try {
+      const { reg, sub } = await pushState();
+      if (sub) {
+        await api("/api/push/unsubscribe", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: sub.endpoint }) });
+        await sub.unsubscribe();
+        reachUi(false, "Unsubscribed — this device is quiet again.");
+        return;
+      }
+      if (Notification.permission === "denied")
+        throw new Error("notifications are blocked for this site — "
+                        + "allow them in browser settings first");
+      const vap = await api("/api/push/vapid");
+      const fresh = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: b64uToBytes(vap.public_key) });
+      await api("/api/push/subscribe", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscription: fresh.toJSON(),
+          ua: navigator.userAgent.slice(0, 160) }) });
+      reachUi(true, ENT + " can now reach this device — sparingly, "
+                    + "by design.");
+    } catch (e) {
+      reachUi(false, "⚠ " + e.message, true);
+    } finally { btn.disabled = false; }
+  });
+}
+initReach();
+
+/* keyboard-aware chat (mobile): when the on-screen keyboard eats the
+   viewport, shrink the log so the input stays visible above it */
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const refit = () => {
+    const eaten = window.innerHeight - vv.height;
+    const log = $("chatlog");
+    if (eaten > 120) {
+      log.style.height =
+        Math.max(140, Math.round(vv.height * 0.36)) + "px";
+      if (document.activeElement === $("chatinput"))
+        setTimeout(() => $("chatform")
+          .scrollIntoView({ block: "end", behavior: "smooth" }), 60);
+    } else { log.style.height = ""; }
+  };
+  vv.addEventListener("resize", refit);
+  vv.addEventListener("scroll", refit);
 }
 
 /* ── main loop ── */

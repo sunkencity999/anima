@@ -81,12 +81,15 @@ def resolve_anima_executable(argv0: Optional[str] = None) -> str:
 
 
 def build_exec_start(anima_path: str, root: str, *,
-                     web: bool = True, telegram: bool = False) -> str:
+                     web: bool = True, telegram: bool = False,
+                     tls: bool = False) -> str:
     args: List[str] = [anima_path, "run", "--root", os.path.abspath(root)]
     if web:
         args.append("--web")
     if telegram:
         args.append("--telegram")
+    if tls:
+        args.append("--tls")
     return " ".join(shlex.quote(a) for a in args)
 
 
@@ -169,7 +172,7 @@ class ServiceManager:
     # ── verbs ─────────────────────────────────────────────────────────
     def install(self, root: str, *, name: Optional[str] = None,
                 web: bool = True, telegram: bool = False,
-                force: bool = False,
+                tls: bool = False, force: bool = False,
                 anima_path: Optional[str] = None) -> int:
         self.require_systemd()
         root = os.path.abspath(root)
@@ -188,7 +191,8 @@ class ServiceManager:
         exe = anima_path or resolve_anima_executable()
         text = render_unit(name, root,
                            build_exec_start(exe, root, web=web,
-                                            telegram=telegram))
+                                            telegram=telegram,
+                                            tls=tls))
         os.makedirs(self.unit_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
